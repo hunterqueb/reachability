@@ -293,8 +293,21 @@ if __name__ == "__main__":
     plot_snapshot_hulls(
         hulls,
         dt,
-        show_points=False,  # set True if you want clouds underneath
+        show_points=True,  # set True if you want clouds underneath
         snapshots=snapshots,
         title="Reachable Set Over Time (Convex Hulls per Snapshot)"
     )
+    # solve nominal system for reference
+    x_nom = np.array(x0_mean, dtype=float)
+    traj_nom = np.zeros((steps + 1, 2), dtype=float)
+    traj_nom[0] = x_nom
+    for k in range(steps):
+        x_nom = rk4_step(x_nom, 0.0, dt, omega, zeta)
+        traj_nom[k + 1] = x_nom
+    # plot nominal trajectory on top of last figure
+    plt.plot(traj_nom[:, 0], traj_nom[:, 1], 'k--', linewidth=2.5, label="nominal trajectory")
+    plt.legend(loc="best", frameon=True)
+    # plot nominal trajectory location of snapshots
+    for k in snapshot_indices:
+        plt.plot(traj_nom[k, 0], traj_nom[k, 1], 'o', markersize=8,color='C'+str(snapshot_indices.index(k)))
     plt.show()
