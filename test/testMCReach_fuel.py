@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-BVP = False
+BVP = True
 
 # -----------------------------
 # Dynamics + numerical integrator
@@ -190,16 +190,16 @@ def plot_snapshots_and_final_hull(snapshots, X_final, dt, title="Monte Carlo + C
     snap_keys = sorted(snapshots.keys())
     for k in snap_keys:
         Xk = snapshots[k]
-        ax.scatter(Xk[:, 0], Xk[:, 1], s=3, alpha=0.06, label=f"t={k*dt:.2f}s" if k != snap_keys[0] else None)
+        # ax.scatter(Xk[:, 0], Xk[:, 1], s=3, alpha=0.06, label=f"t={k*dt:.2f}s" if k != snap_keys[0] else None)
 
     # Plot final points
-    ax.scatter(X_final[:, 0], X_final[:, 1], s=6, alpha=0.18, label="final samples")
+    # ax.scatter(X_final[:, 0], X_final[:, 1], s=6, alpha=0.18, label="final samples")
 
     # Convex hull of final points
     hull = convex_hull_2d(X_final)
     if hull.shape[0] >= 3:
         hull_closed = np.vstack([hull, hull[0]])
-        ax.plot(hull_closed[:, 0], hull_closed[:, 1], linewidth=2.5, label="final convex hull")
+        ax.plot(hull_closed[:, 0], hull_closed[:, 1], linewidth=2.5, label=f"final convex hull, t = {steps*dt:.2f}s", color="C4")
     elif hull.shape[0] > 0:
         ax.scatter(hull[:, 0], hull[:, 1], s=50, label="degenerate hull")
 
@@ -394,13 +394,6 @@ if __name__ == "__main__":
         seed=1
     )
 
-    plot_snapshots_and_final_hull(
-        snapshots,
-        X_final,
-        dt,
-        title="Linear Oscillator Reachability (Monte Carlo Trajectories + Final Convex Hull)"
-    )
-
     hulls = compute_hulls_for_snapshots(
         snapshots,
         downsample=8000,  # None for full set; use a number to speed up
@@ -552,4 +545,13 @@ if __name__ == "__main__":
             plt.title("Optimal Control from BVP Solution")
             plt.grid(True)
             plt.legend(loc="best", frameon=True)
+        plot_snapshots_and_final_hull(
+        snapshots,
+        X_final,
+        dt,
+        title="Linear Oscillator Reachability (Nominal + BVP Trajectories)"
+        )
+        plt.plot(traj_nom[:, 0], traj_nom[:, 1], 'k--', linewidth=2.5, label="nominal trajectory")
+        plt.plot(traj_bvp[:, 0], traj_bvp[:, 1], '--', linewidth=2.0, label="optimal BVP traj")
+        plt.legend(loc="best", frameon=True)
     plt.show()
