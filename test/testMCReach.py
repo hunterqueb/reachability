@@ -318,7 +318,106 @@ if __name__ == "__main__":
     for k in range(steps):
         x_max = rk4_step(x_max, -u_max, dt, omega, zeta)
         traj_max[k + 1] = x_max
-    plt.plot(traj_max[:, 0], traj_max[:, 1], 'r--', linewidth=2.5, label="max control trajectory")
-    plt.legend(loc="best", frameon=True)
 
+    # -----------------------------
+    # Two-point BVP on outer hull (fuel system, CasADi)
+    # -----------------------------
+    try:
+        import casadi as ca
+    except Exception as exc:
+        ca = None
+        print("CasADi not available; skipping BVP block:", exc)
+
+    if ca is not None:
+        def solve_bvp_fuel(
+            x0,
+            xf,
+            dt,
+            steps,
+            omega,
+            zeta,
+            u_max,
+            mass=1.0,
+            fuel0=1.0,
+            burn_rate=0.05,
+            terminal_slack_weight=5e3
+        ):
+            opti = ca.Opti()
+            X = opti.variable(3, steps + 1)  # [x1, x2, mf]
+            U = opti.variable(1, steps)
+            S = opti.variable(2, 1)  # terminal slack for feasibility
+
+            opti.subject_to(X[:, 0] == ca.vertcat(x0[0], x0[1], fuel0))
+            opti.subject_to(X[0, -1] + S[0] == xf[0])
+            opti.subject_to(X[1, -1] + S[1] == xf[1])
+
+            for k in range(steps):
+                xk = X[:, k]
+                uk = U[0, k]
+                mf = ca.fmax(0, xk[2])
+                u_eff = ca.if_else(mf > 0, uk, 0.0)
+                total_mass = mass + mf
+                def f(x):
+                    mf_k = ca.fmax(0, x[2])
+                    u_eff_k = ca.if_else(mf_k > 0, uk, 0.0)
+                    total_mass_k = mass + mf_k
+                    return ca.vertcat(
+                        x[1],
+                        -(omega**2) * x[0] - 2.0 * zeta * omega * x[1] + (u_eff_k / total_mass_k),
+                        -burn_rate * ca.fabs(u_eff_k)
+                    )
+
+                k1 = f(xk)
+                k2 = f(xk + 0.5 * dt * k1)
+                k3 = f(xk + 0.5 * dt * k2)
+                k4 = f(xk + dt * k3)
+                x_next = xk + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+                opti.subject_to(X[:, k + 1] == x_next)
+
+            opti.subject_to(opti.bounded(-u_max, U, u_max))
+            opti.subject_to(X[2, :] >= 0)
+            opti.subject_to(ca.fabs(S[0]) <= 0.25)
+            opti.subject_to(ca.fabs(S[1]) <= 0.25)
+
+            # Minimum control effort + small terminal error penalty for feasibility
+            obj = ca.sumsqr(U) + terminal_slack_weight * ca.sumsqr(S)
+            opti.minimize(obj)
+
+            # Initial guesses improve feasibility
+            opti.set_initial(X, np.tile(np.array([[x0[0]], [x0[1]], [fuel0]]), (1, steps + 1)))
+            opti.set_initial(U, 0.0)
+            opti.set_initial(S, 0.0)
+
+            opti.solver("ipopt", {"print_time": False}, {"print_level": 0})
+            sol = opti.solve()
+            return np.array(sol.value(X)).T, np.array(sol.value(U)).reshape(-1)
+
+        # pick a few outer hull points from the final set
+        hull_final = convex_hull_2d(X_final)
+        if hull_final.shape[0] >= 3:
+            # take the farthest points (by radius) as boundary targets
+            radii = np.linalg.norm(hull_final, axis=1)
+            idx = int(np.argsort(radii)[-1])  # single farthest boundary point
+            xf = hull_final[idx]
+
+            try:
+                traj_bvp, u_bvp = solve_bvp_fuel(
+                    x0=x0_mean,
+                    xf=xf,
+                    dt=dt,
+                    steps=400,  # longer horizon for feasibility
+                    omega=omega,
+                    zeta=zeta,
+                    u_max=u_max,
+                    mass=1.0,
+                    fuel0=1.0,
+                    burn_rate=0.05,
+                    terminal_slack_weight=5e3
+                )
+                plt.plot(traj_bvp[:, 0], traj_bvp[:, 1], '--', linewidth=2.0, label="optimal BVP traj")
+            except Exception as exc:
+                print(f"BVP failed: {exc}")
+        else:
+            print("Not enough hull points for BVP targets.")
+    plt.legend(loc="best", frameon=True)
     plt.show()
