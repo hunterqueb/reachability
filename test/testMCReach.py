@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 # -----------------------------
 # Dynamics + numerical integrator
 # -----------------------------
-def linear_oscillator_f(x, u, omega, zeta):
+def linear_oscillator_f(x, u, omega, zeta,total_mass=2):
     """
     x = [x1, x2]
     x1dot = x2
@@ -13,7 +13,7 @@ def linear_oscillator_f(x, u, omega, zeta):
     """
     x1, x2 = x
     dx1 = x2
-    dx2 = -(omega**2) * x1 - 2.0 * zeta * omega * x2 + u
+    dx2 = -(omega**2) * x1 - 2.0 * zeta * omega * x2 + u / total_mass
     return np.array([dx1, dx2], dtype=float)
 
 
@@ -310,4 +310,15 @@ if __name__ == "__main__":
     # plot nominal trajectory location of snapshots
     for k in snapshot_indices:
         plt.plot(traj_nom[k, 0], traj_nom[k, 1], 'o', markersize=8,color='C'+str(snapshot_indices.index(k)))
+
+    # propagate the nominal trajectory with full umax control to see extremes
+    x_max = np.array(x0_mean, dtype=float)
+    traj_max = np.zeros((steps + 1, 2), dtype=float)
+    traj_max[0] = x_max
+    for k in range(steps):
+        x_max = rk4_step(x_max, -u_max, dt, omega, zeta)
+        traj_max[k + 1] = x_max
+    plt.plot(traj_max[:, 0], traj_max[:, 1], 'r--', linewidth=2.5, label="max control trajectory")
+    plt.legend(loc="best", frameon=True)
+
     plt.show()
