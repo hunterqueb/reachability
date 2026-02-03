@@ -1,5 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
+try:
+    from numba import njit, prange
+    _HAVE_NUMBA = True
+except Exception:
+    _HAVE_NUMBA = False
 
 
 BVP = True
@@ -33,6 +38,103 @@ def rk4_step(x, u, dt, omega, zeta, mass=1.0, fuel_burn_rate=0.1):
 
 
 # -----------------------------
+# Numba-accelerated kernels
+# -----------------------------
+if _HAVE_NUMBA:
+    _CONTROL_KIND_VELOCITY = 3
+
+    @njit
+    def _linear_oscillator_f_nb(x, u, omega, zeta, mass, fuel_burn_rate):
+        x1 = x[0]
+        x2 = x[1]
+        mf = x[2]
+        if mf < 0.0:
+            mf = 0.0
+        u_eff = u if mf > 0.0 else 0.0
+        total_mass = mass + mf
+        dx1 = x2
+        dx2 = -(omega**2) * x1 - 2.0 * zeta * omega * x2 + (u_eff / total_mass)
+        dmf = -fuel_burn_rate * abs(u_eff)
+        out = np.empty(3, dtype=np.float64)
+        out[0] = dx1
+        out[1] = dx2
+        out[2] = dmf
+        return out
+
+
+    @njit
+    def _rk4_step_nb(x, u, dt, omega, zeta, mass, fuel_burn_rate):
+        k1 = _linear_oscillator_f_nb(x, u, omega, zeta, mass, fuel_burn_rate)
+        k2 = _linear_oscillator_f_nb(x + 0.5 * dt * k1, u, omega, zeta, mass, fuel_burn_rate)
+        k3 = _linear_oscillator_f_nb(x + 0.5 * dt * k2, u, omega, zeta, mass, fuel_burn_rate)
+        k4 = _linear_oscillator_f_nb(x + dt * k3, u, omega, zeta, mass, fuel_burn_rate)
+        return x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+
+    @njit(parallel=True)
+    def _monte_carlo_reachable_set_numba(
+        x0_posvel,
+        mf0,
+        u_seqs,
+        dt,
+        omega,
+        zeta,
+        mass,
+        fuel_burn_rate,
+        u_max,
+        control_kind_id,
+        snapshot_indices,
+        snapshots,
+        snapshots_full,
+        X_final,
+        X_final_full
+    ):
+        n_traj = x0_posvel.shape[0]
+        n_snaps = snapshot_indices.shape[0]
+        steps = u_seqs.shape[1]
+
+        for i in prange(n_traj):
+            x = np.empty(3, dtype=np.float64)
+            x[0] = x0_posvel[i, 0]
+            x[1] = x0_posvel[i, 1]
+            x[2] = mf0[i]
+
+            for s in range(n_snaps):
+                if snapshot_indices[s] == 0:
+                    snapshots[s, i, 0] = x[0]
+                    snapshots[s, i, 1] = x[1]
+                    snapshots_full[s, i, 0] = x[0]
+                    snapshots_full[s, i, 1] = x[1]
+                    snapshots_full[s, i, 2] = x[2]
+
+            for k in range(steps):
+                if control_kind_id == _CONTROL_KIND_VELOCITY:
+                    v = x[1]
+                    if v > 0.0:
+                        u = u_max
+                    elif v < 0.0:
+                        u = -u_max
+                    else:
+                        u = 0.0
+                else:
+                    u = u_seqs[i, k]
+                x = _rk4_step_nb(x, u, dt, omega, zeta, mass, fuel_burn_rate)
+                k1 = k + 1
+                for s in range(n_snaps):
+                    if snapshot_indices[s] == k1:
+                        snapshots[s, i, 0] = x[0]
+                        snapshots[s, i, 1] = x[1]
+                        snapshots_full[s, i, 0] = x[0]
+                        snapshots_full[s, i, 1] = x[1]
+                        snapshots_full[s, i, 2] = x[2]
+
+            X_final[i, 0] = x[0]
+            X_final[i, 1] = x[1]
+            X_final_full[i, 0] = x[0]
+            X_final_full[i, 1] = x[1]
+            X_final_full[i, 2] = x[2]
+
+# -----------------------------
 # Control sampling
 # -----------------------------
 def sample_control_sequence(steps, u_max, rng, kind="bangbang", switch_prob=0.05):
@@ -43,7 +145,10 @@ def sample_control_sequence(steps, u_max, rng, kind="bangbang", switch_prob=0.05
       - "bangbang": u in {+u_max, -u_max}, with random switching
       - "uniform":  u ~ U[-u_max, u_max] i.i.d.
       - "piecewise_constant": random value held, switches with prob switch_prob
+      - "velocity": state-dependent; handled inside rollout, not here
     """
+    if kind == "velocity":
+        raise ValueError("velocity control is state-dependent; handled inside rollout")
     if kind == "uniform":
         return rng.uniform(-u_max, u_max, size=steps)
 
@@ -135,48 +240,92 @@ def monte_carlo_reachable_set(
     rad = np.asarray(x0_box_radius, dtype=float).reshape(2)
 
     snapshot_indices = tuple(int(i) for i in snapshot_indices if 0 <= i <= steps)
-    snapshots = {i: np.zeros((n_traj, 2), dtype=float) for i in snapshot_indices}
-    snapshots_full = {i: np.zeros((n_traj, 3), dtype=float) for i in snapshot_indices}
+    snapshot_idx_arr = np.asarray(snapshot_indices, dtype=np.int64)
 
+    # Precompute randomness in NumPy for Numba compatibility.
+    x0_posvel = x0_mean + rng.uniform(-1.0, 1.0, size=(n_traj, 2)) * rad
+    mf0 = fuel_mass0 + rng.uniform(-1.0, 1.0, size=n_traj) * fuel_radius
+    mf0 = np.maximum(0.0, mf0)
+
+    control_kind = str(control_kind).lower()
+    if control_kind != "velocity":
+        u_seqs = np.empty((n_traj, steps), dtype=float)
+        for i in range(n_traj):
+            u_seqs[i] = sample_control_sequence(
+                steps=steps,
+                u_max=u_max,
+                rng=rng,
+                kind=control_kind,
+                switch_prob=switch_prob
+            )
+    else:
+        # Placeholder array for Numba signature; not used in velocity mode.
+        u_seqs = np.zeros((n_traj, steps), dtype=float)
+
+    snapshots_arr = np.zeros((len(snapshot_indices), n_traj, 2), dtype=float)
+    snapshots_full_arr = np.zeros((len(snapshot_indices), n_traj, 3), dtype=float)
     X_final = np.zeros((n_traj, 2), dtype=float)
     X_final_full = np.zeros((n_traj, 3), dtype=float)
 
-    for i in range(n_traj):
-        # sample initial condition from a box
-        x_posvel = x0_mean + rng.uniform(-1.0, 1.0, size=2) * rad
-        mf0 = fuel_mass0 + rng.uniform(-1.0, 1.0) * fuel_radius
-        mf0 = max(0.0, mf0)
-        x = np.array([x_posvel[0], x_posvel[1], mf0], dtype=float)
-
-        u_seq = sample_control_sequence(
-            steps=steps,
-            u_max=u_max,
-            rng=rng,
-            kind=control_kind,
-            switch_prob=switch_prob
+    if _HAVE_NUMBA:
+        control_kind_id = 3 if control_kind == "velocity" else 0
+        _monte_carlo_reachable_set_numba(
+            x0_posvel,
+            mf0,
+            u_seqs,
+            dt,
+            omega,
+            zeta,
+            mass,
+            fuel_burn_rate,
+            u_max,
+            control_kind_id,
+            snapshot_idx_arr,
+            snapshots_arr,
+            snapshots_full_arr,
+            X_final,
+            X_final_full
         )
+    else:
+        for i in range(n_traj):
+            x = np.array([x0_posvel[i, 0], x0_posvel[i, 1], mf0[i]], dtype=float)
 
-        if 0 in snapshots:
-            snapshots[0][i] = x[:2]
-            snapshots_full[0][i] = x
+            for s, k in enumerate(snapshot_indices):
+                if k == 0:
+                    snapshots_arr[s, i] = x[:2]
+                    snapshots_full_arr[s, i] = x
 
-        for k in range(steps):
-            x = rk4_step(
-                x,
-                u_seq[k],
-                dt,
-                omega,
-                zeta,
-                mass=mass,
-                fuel_burn_rate=fuel_burn_rate
-            )
-            if (k + 1) in snapshots:
-                snapshots[k + 1][i] = x[:2]
-                snapshots_full[k + 1][i] = x
+            for k in range(steps):
+                if control_kind == "velocity":
+                    v = x[1]
+                    if v > 0.0:
+                        u = u_max
+                    elif v < 0.0:
+                        u = -u_max
+                    else:
+                        u = 0.0
+                else:
+                    u = u_seqs[i, k]
+                x = rk4_step(
+                    x,
+                    u,
+                    dt,
+                    omega,
+                    zeta,
+                    mass=mass,
+                    fuel_burn_rate=fuel_burn_rate
+                )
+                k1 = k + 1
+                for s, snap_k in enumerate(snapshot_indices):
+                    if snap_k == k1:
+                        snapshots_arr[s, i] = x[:2]
+                        snapshots_full_arr[s, i] = x
 
-        X_final[i] = x[:2]
-        X_final_full[i] = x
+            X_final[i] = x[:2]
+            X_final_full[i] = x
 
+    snapshots = {int(k): snapshots_arr[idx] for idx, k in enumerate(snapshot_indices)}
+    snapshots_full = {int(k): snapshots_full_arr[idx] for idx, k in enumerate(snapshot_indices)}
     return snapshots, snapshots_full, X_final, X_final_full
 
 
@@ -368,7 +517,7 @@ if __name__ == "__main__":
     steps = 800  # 16 seconds
 
     # Monte Carlo
-    n_traj = 20000  # increase for tighter hull
+    n_traj = 100000  # increase for tighter hull
     x0_mean = [0.2, 0.0]
     x0_box_radius = [0.02, 0.02]
 
@@ -388,7 +537,7 @@ if __name__ == "__main__":
         fuel_mass0=fuel_mass0,
         fuel_radius=0.5,
         fuel_burn_rate=fuel_burn_rate,
-        control_kind="bangbang",     # "uniform" or "piecewise_constant" also supported
+        control_kind="velocity",     # "uniform", "piecewise_constant", "velocity", and bangbang supported
         switch_prob=0.05,            # more switching explores more directions
         snapshot_indices=snapshot_indices,
         seed=1
@@ -403,7 +552,7 @@ if __name__ == "__main__":
     plot_snapshot_hulls(
         hulls,
         dt,
-        show_points=False,  # set True if you want clouds underneath
+        show_points=True,  # set True if you want clouds underneath
         snapshots=snapshots,
         title="Reachable Set Over Time (Convex Hulls per Snapshot)"
     )
@@ -508,36 +657,46 @@ if __name__ == "__main__":
                 sol = opti.solve()
                 return np.array(sol.value(X)).T, np.array(sol.value(U)).reshape(-1)
 
-            # pick a few outer hull points from the final set
+            # pick feasible outer hull points from the final set
             hull_final = convex_hull_2d(X_final)
             if hull_final.shape[0] >= 3:
-                # take the farthest points (by radius) as boundary targets
+                # start near the outer hull, then back off if infeasible
                 radii = np.linalg.norm(hull_final, axis=1)
-                idx = int(np.argsort(radii)[-1])  # single farthest boundary point
-                xf = hull_final[idx]
-
-                try:
-                    traj_bvp, u_bvp = solve_bvp_fuel(
-                        x0=x0_mean,
-                        xf=xf,
-                        dt=dt,
-                        steps=snapshot_indices[-1],  # longer horizon for feasibility
-                        omega=omega,
-                        zeta=zeta,
-                        u_max=u_max,
-                        mass=mass,
-                        fuel0=fuel_mass0,
-                        burn_rate=fuel_burn_rate,
-                        terminal_slack_weight=5e3
-                    )
-                    plt.plot(traj_bvp[:, 0], traj_bvp[:, 1], '--', linewidth=2.0, label="optimal BVP traj")
-                except Exception as exc:
-                    print(f"BVP failed: {exc}")
+                order = np.argsort(radii)
+                start = int(0.85 * (order.size - 1))
+                u_bvp = None
+                tried = False
+                solved = False
+                for j in range(start, -1, -1):
+                    idx = int(order[j])
+                    xf = hull_final[idx]
+                    tried = True
+                    try:
+                        traj_bvp, u_bvp = solve_bvp_fuel(
+                            x0=x0_mean,
+                            xf=xf,
+                            dt=dt,
+                            steps=int(snapshot_indices[-1] * 1.5),  # longer horizon for feasibility
+                            omega=omega,
+                            zeta=zeta,
+                            u_max=u_max,
+                            mass=mass,
+                            fuel0=fuel_mass0,
+                            burn_rate=fuel_burn_rate,
+                            terminal_slack_weight=5e5
+                        )
+                        ax.plot(traj_bvp[:, 0], traj_bvp[:, 1],traj_bvp[:, 2], '--', linewidth=2.0, label="optimal BVP traj")
+                        solved = True
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                if tried and not solved:
+                    print(f"BVP failed: {last_exc}")
             else:
                 print("Not enough hull points for BVP targets.")
         plt.legend(loc="best", frameon=True)  
         # plot control from BVP on a separate figure
-        if ca is not None and hull_final.shape[0] >= 3:
+        if ca is not None and hull_final.shape[0] >= 3 and u_bvp is not None:
             plt.figure(figsize=(9,4))
             plt.plot(u_bvp, label="BVP optimal control")
             plt.xlabel("Time step")
