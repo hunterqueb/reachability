@@ -7,7 +7,7 @@ except Exception:
     _HAVE_NUMBA = False
 
 
-BVP = True
+BVP = False
 
 # -----------------------------
 # Dynamics + numerical integrator
@@ -524,6 +524,13 @@ if __name__ == "__main__":
     # Choose snapshot times (indices)
     snapshot_indices = (0, 100, 200, 400, 800)
 
+    zoneNums = 10
+    snapshot_indices = [0]
+
+    for i in range(1, zoneNums + 1):
+        snapshot_indices.append(int(i * steps / zoneNums))
+    print("Snapshot indices:", snapshot_indices)
+    print("Snapshot Timesets:", [round(i*dt,2) for i in snapshot_indices])
     snapshots, snapshots_full, X_final, X_final_full = monte_carlo_reachable_set(
         x0_mean=x0_mean,
         x0_box_radius=x0_box_radius,
@@ -552,7 +559,7 @@ if __name__ == "__main__":
     plot_snapshot_hulls(
         hulls,
         dt,
-        show_points=True,  # set True if you want clouds underneath
+        show_points=False,  # set True if you want clouds underneath
         snapshots=snapshots,
         title="Reachable Set Over Time (Convex Hulls per Snapshot)"
     )
