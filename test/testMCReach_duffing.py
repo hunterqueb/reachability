@@ -5,9 +5,7 @@ try:
     _HAVE_NUMBA = True
 except Exception:
     _HAVE_NUMBA = False
-
-_HAVE_NUMBA = False
-
+    
 # -----------------------------
 # Dynamics + numerical integrator
 # -----------------------------
