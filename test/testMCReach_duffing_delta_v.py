@@ -6,7 +6,7 @@ try:
 except Exception:
     _HAVE_NUMBA = False
     
-_HAVE_NUMBA = False
+_HAVE_NUMBA = True
 
 
 
