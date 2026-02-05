@@ -34,6 +34,7 @@ input_size = problemDim
 output_size = problemDim
 num_layers = 1
 lookback = 1
+horizon = 10
 
 
 # load data
@@ -63,8 +64,6 @@ def make_sequence_dataset(trajectories, lookback, horizon=1):
             y_list.append(traj[i + lookback:i + lookback + horizon])
     x = np.stack(x_list, axis=0)
     y = np.stack(y_list, axis=0)
-    if horizon == 1:
-        y = y[:, 0, :]
     return x, y
 
 
@@ -81,21 +80,24 @@ class TrajectoryDataset(data.Dataset):
 
 
 class LSTMReachability(torch.nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers):
+    def __init__(self, input_size, hidden_size, output_size, num_layers, horizon):
         super().__init__()
+        self.horizon = horizon
+        self.output_size = output_size
         self.lstm = torch.nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
         )
-        self.fc = torch.nn.Linear(hidden_size, output_size)
+        self.fc = torch.nn.Linear(hidden_size, output_size * horizon)
 
     def forward(self, x):
         # x: (batch, lookback, input_size)
         out, _ = self.lstm(x)
         last = out[:, -1, :]
-        return self.fc(last)
+        pred = self.fc(last)
+        return pred.view(-1, self.horizon, self.output_size)
 
 
 hidden_size = 32
@@ -107,8 +109,8 @@ split_idx = int(num_traj * train_frac)
 train_traj = numericResult[:split_idx]
 test_traj = numericResult[split_idx:]
 
-x_train, y_train = make_sequence_dataset(train_traj, lookback, horizon=1)
-x_test, y_test = make_sequence_dataset(test_traj, lookback, horizon=1)
+x_train, y_train = make_sequence_dataset(train_traj, lookback, horizon=horizon)
+x_test, y_test = make_sequence_dataset(test_traj, lookback, horizon=horizon)
 
 train_ds = TrajectoryDataset(x_train, y_train, device)
 test_ds = TrajectoryDataset(x_test, y_test, device)
@@ -116,7 +118,7 @@ test_ds = TrajectoryDataset(x_test, y_test, device)
 train_loader = data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
 test_loader = data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
-model = LSTMReachability(input_size, hidden_size, output_size, num_layers).to(device)
+model = LSTMReachability(input_size, hidden_size, output_size, num_layers, horizon).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 loss_fn = torch.nn.MSELoss()
 
@@ -158,10 +160,11 @@ with torch.no_grad():
         plt.figure()
         plt.plot(range(lookback), xb[i, :, 0], label='Input x1')
         plt.plot(range(lookback), xb[i, :, 1], label='Input x2')
-        plt.plot(lookback, yb[i, 0], 'go', label='True x1')
-        plt.plot(lookback, yb[i, 1], 'ro', label='True x2')
-        plt.plot(lookback, pred[i, 0], 'g^', label='Pred x1')
-        plt.plot(lookback, pred[i, 1], 'r^', label='Pred x2')
+        steps = np.arange(lookback, lookback + horizon)
+        plt.plot(steps, yb[i, :, 0], 'g-', label='True x1')
+        plt.plot(steps, yb[i, :, 1], 'r-', label='True x2')
+        plt.plot(steps, pred[i, :, 0], 'g--', label='Pred x1')
+        plt.plot(steps, pred[i, :, 1], 'r--', label='Pred x2')
         plt.legend()
         plt.title(f'Test Sample {i+1}')
         plt.xlabel('Time Step')
@@ -176,7 +179,7 @@ num_samples = 0
 with torch.no_grad():
     for xb, yb in test_loader:
         pred = model(xb)
-        error = torch.sqrt(torch.mean((pred - yb) ** 2, dim=1))  # RMSE per sample
+        error = torch.sqrt(torch.mean((pred - yb) ** 2, dim=(1, 2)))  # RMSE per sample
         total_error += torch.sum(error).item()
         num_samples += xb.size(0)
 avg_error = total_error / num_samples
