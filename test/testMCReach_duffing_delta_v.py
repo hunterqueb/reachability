@@ -5,9 +5,6 @@ try:
     _HAVE_NUMBA = True
 except Exception:
     _HAVE_NUMBA = False
-    
-_HAVE_NUMBA = True
-
 
 
 # -----------------------------
@@ -323,9 +320,22 @@ if __name__ == "__main__":
     total_mass = 2.0
     delta_v_radius = 0.3
 
+    # args parse for delta v_radius
+    import argparse
+    parser = argparse.ArgumentParser(description="Duffing Oscillator Monte Carlo Reachability")
+    parser.add_argument("--deltaV", type=float, default=0.3, help="Radius of delta-v perturbation at control time")
+    parser.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
+    parser.add_argument("--hulls", type=int, default=100, help="Number of hull zones to compute and plot")
+    parser.add_argument("--T", type=float, default=16.0, help="Total simulation time in seconds")
+    if parser.parse_args().no_numba:
+        _HAVE_NUMBA = False
+    args = parser.parse_args()
+    delta_v_radius = args.deltaV
+
+
     # Time
     dt = 0.02
-    steps = 800  # 16 seconds
+    steps = int(args.T / dt)
 
     # Monte Carlo
     n_traj = 20000  # increase for tighter hull
@@ -335,7 +345,7 @@ if __name__ == "__main__":
     # Choose snapshot times (indices)
     snapshot_indices = (0, 100, 200, 400, 800)
     
-    zoneNums = 100
+    zoneNums = args.hulls
     snapshot_indices = [0]
 
     for i in range(1, zoneNums + 1):
