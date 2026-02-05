@@ -166,7 +166,9 @@ with torch.no_grad():
         plt.title(f'Test Sample {i+1}')
         plt.xlabel('Time Step')
         plt.ylabel('State Value')
-        plt.show()
+# save plots
+        plt.savefig(f'lstm_prediction_sample_{i+1}.png')
+        plt.close()
 # compute average error on test set
 model.eval()
 total_error = 0.0
