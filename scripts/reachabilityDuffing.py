@@ -18,7 +18,7 @@ from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSupe
 # from nets import Adam_mini
 
 
-modelString = 'lstm'  # 'mamba' or 'lstm'
+modelString = 'mamba'  # 'mamba' or 'lstm'
 
 
 problemDim = 2
@@ -27,7 +27,7 @@ device = getDevice()
 
 
 # hyperparameters
-n_epochs = 1
+n_epochs = 10
 lr = 0.001
 input_size = problemDim
 output_size = problemDim
