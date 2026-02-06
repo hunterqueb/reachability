@@ -236,7 +236,7 @@ with torch.no_grad():
     plt.ylabel('x2')
     plt.legend(loc='best')
     # save plot
-    plt.savefig("plots/"+modelString+f'_reachability_new_prediction_epoch_{n_epochs}_index_{traj_idx}.png')
+    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}.png')
     plt.close()
 
     # convex hulls of final states (predicted vs true)
@@ -259,7 +259,7 @@ with torch.no_grad():
     plt.xlabel('x1')
     plt.ylabel('x2')
     plt.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_hulls_epoch_{n_epochs}.png')
+    plt.savefig("plots/" + modelString + f'_final_state_hulls_ratio_{args.train_ratio}_epoch_{n_epochs}.png')
     plt.close()
 
     plt.figure()
@@ -270,7 +270,7 @@ with torch.no_grad():
     plt.xlabel('x1')
     plt.ylabel('x2')
     plt.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_points_epoch_{n_epochs}.png')
+    plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}.png')
     plt.close()
 
     if modelString == 'mamba':
@@ -286,5 +286,5 @@ with torch.no_grad():
         getSuperWeight(model)
         plotSuperWeight(model)
         plotSuperActivation(magnitude, index,printOutValues=True)
-        plt.title("Mamba Classifier Super Activations")
-        plt.savefig("plots/" + modelString + f'_super_activations_epoch_{n_epochs}_index_{traj_index}.png')
+        plt.title("Mamba Reachability Super Activations")
+        plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}.png')
