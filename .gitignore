@@ -1,0 +1,5 @@
+# ignore all .npz files
+*.npz
+
+# ignore all .png files
+*.png
