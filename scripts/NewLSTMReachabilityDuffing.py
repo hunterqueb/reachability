@@ -70,6 +70,10 @@ def create_datasets(data,seq_length,train_size,device):
     X_test = torch.tensor(np.array(X_test)).double().to(device).squeeze()
     Y_test = torch.tensor(np.array(Y_test)).double().to(device).squeeze()
 
+    # reduce test size to 500 for faster training
+    X_test = X_test[:500]
+    Y_test = Y_test[:500]
+
     return X_train,Y_train,X_test,Y_test
 train_in,train_out,test_in,test_out = create_datasets(numericResult,1,train_size,device)
 
