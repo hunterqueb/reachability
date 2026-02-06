@@ -268,7 +268,7 @@ if __name__ == "__main__":
     delta_v_radius = args.deltaV
 
     save_dir = "./data/test/"
-    save_file = f"duffing_monte_carlo_trajectories_dv_{delta_v_radius}_dt_{args.steps}_n_{args.n}.npz"
+    save_file = f"duffing_monte_carlo_trajectories_dv_{delta_v_radius}_dt_{args.dt}_n_{args.n}.npz"
 
     # Time
     dt = args.dt
@@ -321,4 +321,4 @@ if __name__ == "__main__":
 
 
     # save trajectories to disk
-    np.savez(save_dir + save_file, trajectories=traj_list, dt=dt)
+    np.savez(save_dir + save_file, trajectories=traj_list, dt=dt,parameters = [alpha, beta, gamma, omega,zeta,delta_v_radius],T=args.T)
