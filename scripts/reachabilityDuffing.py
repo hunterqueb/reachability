@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.utils.data as data
 import argparse
+from scipy.spatial import ConvexHull, Delaunay
 
 from qutils.ml.utils import printModelParmSize, getDevice, Adam_mini
 from qutils.tictoc import timer
@@ -12,7 +13,7 @@ from qutils.ml.regression import LSTM
 from qutils.ml.utils import findDecAcc
 
 #import for superweight identification
-from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSuperWeight
+from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSuperWeight, findMambaSuperActivation,plotSuperActivation
 
 # from nets import Adam_mini
 
@@ -237,3 +238,53 @@ with torch.no_grad():
     # save plot
     plt.savefig("plots/"+modelString+f'_reachability_new_prediction_epoch_{n_epochs}_index_{traj_idx}.png')
     plt.close()
+
+    # convex hulls of final states (predicted vs true)
+    final_true = test_out[-1].numpy()
+    final_pred = test_pred_full[-1].numpy()
+
+    hull_true = ConvexHull(final_true)
+    hull_pred = ConvexHull(final_pred)
+
+    plt.figure()
+    plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
+    plt.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
+
+    true_poly = np.append(hull_true.vertices, hull_true.vertices[0])
+    pred_poly = np.append(hull_pred.vertices, hull_pred.vertices[0])
+    plt.plot(final_true[true_poly, 0], final_true[true_poly, 1], 'k-', lw=2, label='True Hull')
+    plt.plot(final_pred[pred_poly, 0], final_pred[pred_poly, 1], 'r--', lw=2, label='Pred Hull')
+
+    plt.title(modelString + ' Final-State Convex Hulls')
+    plt.xlabel('x1')
+    plt.ylabel('x2')
+    plt.legend(loc='best')
+    plt.savefig("plots/" + modelString + f'_final_state_hulls_epoch_{n_epochs}.png')
+    plt.close()
+
+    plt.figure()
+    plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
+    plt.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
+
+    plt.title(modelString + ' Final-State Points')
+    plt.xlabel('x1')
+    plt.ylabel('x2')
+    plt.legend(loc='best')
+    plt.savefig("plots/" + modelString + f'_final_state_points_epoch_{n_epochs}.png')
+    plt.close()
+
+    if modelString == 'mamba':
+        xb, yb = next(iter(test_loader))
+        xb_one_traj = xb[:, traj_index:traj_index+1, :]
+        magnitude, index = findMambaSuperActivation(model, xb_one_traj.to(device))
+
+        normedMagsMRP = np.zeros((len(magnitude),))
+        for i in range(len(magnitude)):
+            normedMagsMRP[i] = magnitude[i].norm().detach().cpu()
+
+        printoutMaxLayerWeight(model)
+        getSuperWeight(model)
+        plotSuperWeight(model)
+        plotSuperActivation(magnitude, index,printOutValues=True)
+        plt.title("Mamba Classifier Super Activations")
+        plt.savefig("plots/" + modelString + f'_super_activations_epoch_{n_epochs}_index_{traj_index}.png')
