@@ -24,7 +24,8 @@ parser.add_argument('--traj_index', type=int, default=0, help='Trajectory index 
 parser.add_argument('--dv', type=float, default=0.3, help='Delta v for dataset')
 parser.add_argument('--dt', type=float, default=0.02, help='Time step for dataset')
 parser.add_argument('--n', type=int, default=20000, help='Number of trajectories in dataset')
-
+parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
+parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
@@ -66,7 +67,7 @@ test_size = numericResult.shape[1] - train_size
 def create_datasets(data, seq_length, train_size, device):
     # Split across dimension 0 (time): use edge windows for train (size ~2*horizon)
     # and middle window for test, while keeping 80-20 split across trajectories.
-    split_idx = int(data.shape[1] * 0.8)
+    split_idx = int(data.shape[1] * args.train_ratio)
     time_end = min(num_time_steps, data.shape[0])
     train_time = np.concatenate([data[:horizon], data[time_end - horizon:time_end]], axis=0)
     test_time = data[horizon:time_end - horizon]
@@ -77,20 +78,21 @@ def create_datasets(data, seq_length, train_size, device):
     def build_xy(d):
         xs, ys = [], []
         for i in range(len(d) - seq_length):
-            x = d[i:(i + seq_length)]
-            y = d[i + seq_length]
-            y = y[np.newaxis, ...]  # (1, num_trajectories, problemDim)
+            x = d[i:(i + seq_length)]  # (seq_length, num_trajectories, problemDim)
+            y = d[i + seq_length]      # (num_trajectories, problemDim)
             xs.append(x)
             ys.append(y)
-        return xs, ys
+        X = np.stack(xs, axis=0)  # (num_windows, seq_length, num_trajectories, problemDim)
+        Y = np.stack(ys, axis=0)  # (num_windows, num_trajectories, problemDim)
+        return X, Y
 
     X_train, Y_train = build_xy(train_data)
     X_test, Y_test = build_xy(test_data)
     # Convert to PyTorch tensors (keep on CPU; move batches to GPU in the loop)
-    X_train = torch.tensor(np.array(X_train)).double().squeeze()
-    Y_train = torch.tensor(np.array(Y_train)).double().squeeze()
-    X_test = torch.tensor(np.array(X_test)).double().squeeze()
-    Y_test = torch.tensor(np.array(Y_test)).double().squeeze()
+    X_train = torch.tensor(np.array(X_train)).float().squeeze()
+    Y_train = torch.tensor(np.array(Y_train)).float()
+    X_test = torch.tensor(np.array(X_test)).float().squeeze()
+    Y_test = torch.tensor(np.array(Y_test)).float()
 
 
     return X_train,Y_train,X_test,Y_test
@@ -100,16 +102,16 @@ print(train_out.shape)
 print(test_in.shape)
 print(test_out.shape)
 
-loader = data.DataLoader(data.TensorDataset(train_in, train_out), shuffle=True, batch_size=256)
+loader = data.DataLoader(data.TensorDataset(train_in, train_out), shuffle=True, batch_size=args.batch)
 
 # initilizing the model, criterion, and optimizer for the data
 config = MambaConfig(d_model=problemDim, n_layers=num_layers,d_conv=16)
 
 def returnModel(modelString = 'mamba'):
     if modelString == 'mamba':
-        model = Mamba(config).to(device).double()
+        model = Mamba(config).to(device).float()
     elif modelString == 'lstm':
-        model = LSTM(input_size,30,output_size,num_layers,0).to(device).double()
+        model = LSTM(input_size,30,output_size,num_layers,1).to(device).float()
     printModelParmSize(model)
     return model
 
