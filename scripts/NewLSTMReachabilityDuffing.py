@@ -149,3 +149,6 @@ with torch.no_grad():
     plt.xlabel('x1')
     plt.ylabel('x2')
     plt.legend()
+    # save plot
+    plt.savefig(f'lstm_reachability_prediction_epoch_{n_epochs}.png')
+    plt.close()
