@@ -3,8 +3,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 import torch.utils.data as data
-import torchinfo
-import os 
+import argparse
 
 from qutils.ml.utils import printModelParmSize, getDevice, Adam_mini
 from qutils.tictoc import timer
@@ -17,8 +16,18 @@ from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSupe
 
 # from nets import Adam_mini
 
+# args parsing for model, horizon, traj_index
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', type=str, default='mamba', help='Model to use')
+parser.add_argument('--horizon', type=int, default=5, help='Horizon for prediction')
+parser.add_argument('--traj_index', type=int, default=0, help='Trajectory index to plot')
+parser.add_argument('--dv', type=float, default=0.3, help='Delta v for dataset')
+parser.add_argument('--dt', type=float, default=0.02, help='Time step for dataset')
+parser.add_argument('--n', type=int, default=20000, help='Number of trajectories in dataset')
 
-modelString = 'mamba'  # 'mamba' or 'lstm'
+args = parser.parse_args()
+modelString = args.model
+traj_index = args.traj_index
 
 
 problemDim = 2
@@ -37,7 +46,7 @@ horizon = 5
 
 
 # load data
-dataFile = './data/test/duffing_monte_carlo_trajectories_dv_0.3_dt_100_n_20000.npz'
+dataFile = './data/test/duffing_monte_carlo_trajectories_dv_{}_dt_{}_n_{}.npz'.format(args.dv, args.dt, args.n)
 
 system_data = np.load(dataFile,allow_pickle=True)
 dt = system_data['dt']
@@ -115,8 +124,6 @@ criterion = torch.nn.HuberLoss()
 trainTime = timer()
 for epoch in range(n_epochs):
 
-    # trajPredition = plotPredition(epoch,model,'target',t=t*TU,output_seq=pertNR)
-
     model.train()
     for X_batch, y_batch in loader:
         X_batch = X_batch.to(device)
@@ -174,12 +181,8 @@ with torch.no_grad():
     pred = model(xb).cpu().numpy()
     yb = yb.cpu().numpy()
     xb = xb.cpu().numpy()
-    seq_length = xb.shape[1]
-    train_size = train_in.shape[0]
-    output_seq = np.zeros((seq_length + train_size + test_in.shape[0], problemDim))
-    # shift train predictions for plotting
-    train_plot = np.ones_like(output_seq) * np.nan
-    def predict_last_step(x_all, batch_size=256):
+    traj_idx = traj_index
+    def predict_last_step(x_all, batch_size=256, slice_traj_idx=None):
         loader_eval = data.DataLoader(
             data.TensorDataset(x_all),
             shuffle=False,
@@ -188,29 +191,47 @@ with torch.no_grad():
         preds = []
         for (xb_eval,) in loader_eval:
             xb_eval = xb_eval.to(device)
-            pred = model(xb_eval)[:, -1, :].cpu()
+            pred = model(xb_eval).cpu()
+            if pred.ndim == 3:
+                # If second dim isn't trajectory count, treat it as sequence and take last step.
+                if x_all.ndim >= 2 and pred.shape[1] != x_all.shape[1]:
+                    pred = pred[:, -1, :]
+                if slice_traj_idx is not None:
+                    pred = pred[:, slice_traj_idx, :]
+            elif pred.ndim == 2:
+                # Already (batch, problemDim); no trajectory axis to slice.
+                pass
             preds.append(pred)
         return torch.cat(preds, dim=0)
 
-    train_plot[seq_length:train_size+seq_length] = predict_last_step(train_in).numpy()
-    # shift test predictions for plotting
-    test_plot = np.ones_like(output_seq) * np.nan
-    test_plot[train_size+seq_length:] = predict_last_step(test_in).numpy()
-    # combine for full output sequence
-    output_seq[seq_length:train_size+seq_length] = train_plot[seq_length:train_size+seq_length]
-    output_seq[train_size+seq_length:] = test_plot[train_size+seq_length:]
-    # fill in initial conditions
-    output_seq[:seq_length] = xb[0]
+    train_pred = predict_last_step(train_in, slice_traj_idx=traj_idx).numpy()
+    test_pred = predict_last_step(test_in, slice_traj_idx=traj_idx).numpy()
+    test_pred_full = predict_last_step(test_in)
+    def build_full_seq(x_all, y_all, traj_idx):
+        x_np = x_all.numpy()
+        y_np = y_all.numpy()
+        if x_np.ndim == 4:
+            init = x_np[0, :, traj_idx, :]
+        else:
+            init = x_np[0, traj_idx, :][np.newaxis, :]
+        y_seq = y_np[:, traj_idx, :]
+        print("init shape:", init.shape)
+        print("y_seq shape:", y_seq.shape)
+        return np.concatenate([init, y_seq], axis=0)
+
+    true_test_seq = build_full_seq(test_in, test_out, traj_idx)
+    pred_test_seq = build_full_seq(test_in, test_pred_full, traj_idx)
     # plot
     plt.figure()
-    # plt.plot(output_seq[:,0], output_seq[:,1], label='Predicted Trajectory')
     # color train and test segments differently
-    plt.plot(train_plot[:,0], train_plot[:,1], 'g.', label='Train Predictions')
-    plt.plot(test_plot[:,0], test_plot[:,1], 'r.', label='Test Predictions')
-    plt.title(modelString+' Reachability Prediction')
+    # plt.plot(train_pred[:,0], train_pred[:,1], 'g.', label='Train Predictions')
+    # plt.plot(test_pred[:,0], test_pred[:,1], 'r.', label='Test Predictions')
+    plt.plot(true_test_seq[:,0], true_test_seq[:,1], 'k-', label='True Trajectory')
+    plt.plot(pred_test_seq[:,0], pred_test_seq[:,1], '--', label='Predicted Trajectory')
+    plt.title(modelString+' Reachability Prediction: Trajectory Index '+str(traj_idx))
     plt.xlabel('x1')
     plt.ylabel('x2')
-    plt.legend()
+    plt.legend(loc='best')
     # save plot
-    plt.savefig(modelString+f'_reachability_new_prediction_epoch_{n_epochs}.png')
+    plt.savefig("plots/"+modelString+f'_reachability_new_prediction_epoch_{n_epochs}_index_{traj_idx}.png')
     plt.close()
