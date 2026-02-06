@@ -77,11 +77,11 @@ def create_datasets(data, seq_length, train_size, device):
 
     X_train, Y_train = build_xy(train_data)
     X_test, Y_test = build_xy(test_data)
-    # Convert to PyTorch tensors
-    X_train = torch.tensor(np.array(X_train)).double().to(device).squeeze()
-    Y_train = torch.tensor(np.array(Y_train)).double().to(device).squeeze()
-    X_test = torch.tensor(np.array(X_test)).double().to(device).squeeze()
-    Y_test = torch.tensor(np.array(Y_test)).double().to(device).squeeze()
+    # Convert to PyTorch tensors (keep on CPU; move batches to GPU in the loop)
+    X_train = torch.tensor(np.array(X_train)).float().squeeze()
+    Y_train = torch.tensor(np.array(Y_train)).float().squeeze()
+    X_test = torch.tensor(np.array(X_test)).float().squeeze()
+    Y_test = torch.tensor(np.array(Y_test)).float().squeeze()
 
 
     return X_train,Y_train,X_test,Y_test
@@ -98,9 +98,10 @@ config = MambaConfig(d_model=problemDim, n_layers=num_layers,d_conv=16)
 
 def returnModel(modelString = 'mamba'):
     if modelString == 'mamba':
-        model = Mamba(config).to(device).double()
+        model = Mamba(config).to(device).float()
     elif modelString == 'lstm':
-        model = LSTM(input_size,30,output_size,num_layers,0).double().to(device)
+        model = LSTM(input_size,30,output_size,num_layers,0).to(device).float()
+    printModelParmSize(model)
     return model
 
 model = returnModel(modelString)
@@ -118,6 +119,8 @@ for epoch in range(n_epochs):
 
     model.train()
     for X_batch, y_batch in loader:
+        X_batch = X_batch.to(device)
+        y_batch = y_batch.to(device)
         y_pred = model(X_batch)
         loss = criterion(y_pred, y_batch)
         optimizer.zero_grad()
@@ -126,13 +129,13 @@ for epoch in range(n_epochs):
     # Validation
     model.eval()
     with torch.no_grad():
-        y_pred_train = model(train_in)
-        train_loss = np.sqrt(criterion(y_pred_train, train_out).cpu())
-        y_pred_test = model(test_in)
-        test_loss = np.sqrt(criterion(y_pred_test, test_out).cpu())
+        y_pred_train = model(train_in.to(device))
+        train_loss = np.sqrt(criterion(y_pred_train, train_out.to(device)).cpu())
+        y_pred_test = model(test_in.to(device))
+        test_loss = np.sqrt(criterion(y_pred_test, test_out.to(device)).cpu())
 
-        decAcc, err1 = findDecAcc(train_out,y_pred_train,printOut=False)
-        decAcc, err2 = findDecAcc(test_out,y_pred_test)
+        decAcc, err1 = findDecAcc(train_out.to(device), y_pred_train, printOut=False)
+        decAcc, err2 = findDecAcc(test_out.to(device), y_pred_test)
         err = np.concatenate((err1,err2),axis=0)
 
     print("Epoch %d: train loss %.4f, test loss %.4f\n" % (epoch, train_loss, test_loss))
@@ -145,6 +148,7 @@ test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=Fal
 model.eval()
 with torch.no_grad():
     xb, yb = next(iter(test_loader))
+    xb = xb.to(device)
     pred = model(xb).cpu().numpy()
     yb = yb.cpu().numpy()
     xb = xb.cpu().numpy()
@@ -153,10 +157,10 @@ with torch.no_grad():
     output_seq = np.zeros((seq_length + train_size + test_in.shape[0], problemDim))
     # shift train predictions for plotting
     train_plot = np.ones_like(output_seq) * np.nan
-    train_plot[seq_length:train_size+seq_length] = model(train_in)[:, -1, :].cpu()
+    train_plot[seq_length:train_size+seq_length] = model(train_in.to(device))[:, -1, :].cpu()
     # shift test predictions for plotting
     test_plot = np.ones_like(output_seq) * np.nan
-    test_plot[train_size+seq_length:] = model(test_in)[:, -1, :].cpu()
+    test_plot[train_size+seq_length:] = model(test_in.to(device))[:, -1, :].cpu()
     # combine for full output sequence
     output_seq[seq_length:train_size+seq_length] = train_plot[seq_length:train_size+seq_length]
     output_seq[train_size+seq_length:] = test_plot[train_size+seq_length:]
