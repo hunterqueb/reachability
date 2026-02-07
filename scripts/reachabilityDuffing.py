@@ -28,6 +28,8 @@ parser.add_argument('--n', type=int, default=20000, help='Number of trajectories
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
 parser.add_argument('--batch-test', type=int, default=128, help='Batch size for evaluation')
+parser.add_argument('--n-epochs', type=int, default=10, help='Number of training epochs')
+parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for training')
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
@@ -39,8 +41,8 @@ device = getDevice()
 
 
 # hyperparameters
-n_epochs = 10
-lr = 0.001
+n_epochs = args.n_epochs
+lr = args.lr
 input_size = problemDim
 output_size = problemDim
 num_layers = 1
@@ -237,7 +239,7 @@ with torch.no_grad():
     plt.ylabel('x2')
     plt.legend(loc='best')
     # save plot
-    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}.png')
+    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}_lr_{lr}.png')
     plt.close()
 
     # convex hulls of final states (predicted vs true)
@@ -246,6 +248,14 @@ with torch.no_grad():
 
     hull_true = ConvexHull(final_true)
     hull_pred = ConvexHull(final_pred)
+
+    # calculate hull areas and find ratio of pred hull area to true hull area
+    area_true = hull_true.volume
+    area_pred = hull_pred.volume
+
+    area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
+
+    print(f"True Hull Area: {area_true:.4f}, Pred Hull Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
 
     plt.figure()
     plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
@@ -256,11 +266,11 @@ with torch.no_grad():
     plt.plot(final_true[true_poly, 0], final_true[true_poly, 1], 'k-', lw=2, label='True Hull')
     plt.plot(final_pred[pred_poly, 0], final_pred[pred_poly, 1], 'r--', lw=2, label='Pred Hull')
 
-    plt.title(modelString + ' Final-State Convex Hulls')
+    plt.title(modelString + ' Final-State Convex Hulls: Area Ratio {:.4f}'.format(area_ratio))
     plt.xlabel('x1')
     plt.ylabel('x2')
     plt.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_hulls_ratio_{args.train_ratio}_epoch_{n_epochs}.png')
+    plt.savefig("plots/" + modelString + f'_final_state_hulls_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
     plt.close()
 
     plt.figure()
@@ -271,7 +281,7 @@ with torch.no_grad():
     plt.xlabel('x1')
     plt.ylabel('x2')
     plt.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}.png')
+    plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
     plt.close()
 
     if modelString == 'mamba':
@@ -288,4 +298,4 @@ with torch.no_grad():
         plotSuperWeight(model)
         plotSuperActivation(magnitude, index,printOutValues=True)
         plt.title("Mamba Reachability Super Activations")
-        plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}.png')
+        plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}.png')
