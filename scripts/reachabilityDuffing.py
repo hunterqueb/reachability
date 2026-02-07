@@ -21,12 +21,13 @@ from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSupe
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='mamba', help='Model to use')
 parser.add_argument('--horizon', type=int, default=5, help='Horizon for prediction')
-parser.add_argument('--traj_index', type=int, default=0, help='Trajectory index to plot')
+parser.add_argument('--traj-index', type=int, default=0, help='Trajectory index to plot')
 parser.add_argument('--dv', type=float, default=0.3, help='Delta v for dataset')
 parser.add_argument('--dt', type=float, default=0.02, help='Time step for dataset')
 parser.add_argument('--n', type=int, default=20000, help='Number of trajectories in dataset')
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
+parser.add_argument('--batch-test', type=int, default=128, help='Batch size for evaluation')
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
@@ -119,7 +120,6 @@ def returnModel(modelString = 'mamba'):
 model = returnModel(modelString)
 
 optimizer = Adam_mini(model,lr=lr)
-# optimizer = Adam_mini(model,lr=lr)
 
 criterion = F.smooth_l1_loss
 criterion = torch.nn.HuberLoss()
@@ -139,10 +139,10 @@ for epoch in range(n_epochs):
     # Validation
     model.eval()
     with torch.no_grad():
-        def eval_batches(x_all, y_all, batch_size=256):
+        def eval_batches(x_all, y_all, batch_size=args.batch_test):
             loader_eval = data.DataLoader(
                 data.TensorDataset(x_all, y_all),
-                shuffle=False,
+                shuffle=True,
                 batch_size=batch_size,
             )
             preds = []
@@ -174,18 +174,19 @@ for epoch in range(n_epochs):
 
 trainTime.toc()
 
-test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=256)
-
 # plot some predictions
 model.eval()
 with torch.no_grad():
+    test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
+
     xb, yb = next(iter(test_loader))
     xb = xb.to(device)
-    pred = model(xb).cpu().numpy()
+    pred = model(xb)
+    pred = pred.cpu().numpy()
     yb = yb.cpu().numpy()
     xb = xb.cpu().numpy()
     traj_idx = traj_index
-    def predict_last_step(x_all, batch_size=256, slice_traj_idx=None):
+    def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
         loader_eval = data.DataLoader(
             data.TensorDataset(x_all),
             shuffle=False,
