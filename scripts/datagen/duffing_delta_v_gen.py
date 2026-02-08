@@ -1,4 +1,7 @@
 import numpy as np
+import matplotlib.pyplot as plt
+
+
 try:
     from numba import njit, prange
     _HAVE_NUMBA = True
@@ -262,6 +265,7 @@ if __name__ == "__main__":
     parser.add_argument("--T", type=float, default=16.0, help="Total simulation time in seconds")
     parser.add_argument("--dt", type=float, default=0.02, help="Time step for integration")
     parser.add_argument("--n", type=int, default=20000, help="Number of Monte Carlo trajectories to simulate")
+    parser.add_argument("--plot", action="store_true", help="Set this flag to plot the snapshots and hulls instead of saving data")
     if parser.parse_args().no_numba:
         _HAVE_NUMBA = False
     args = parser.parse_args()
@@ -277,7 +281,7 @@ if __name__ == "__main__":
     # Monte Carlo
     n_traj = args.n  # increase for tighter hull
     x0_mean = [0.2, 0.0]
-    x0_box_radius = [0.02, 0.02]
+    x0_box_radius = [0.2, 0.2]
 
     # Choose snapshot times (indices)
     snapshot_indices = (0, 100, 200, 400, 800)
@@ -304,21 +308,183 @@ if __name__ == "__main__":
         snapshot_indices=snapshot_indices,
         seed=1
     )
-    
-    # using snapshots, construct n_traj trajectories
-    n_traj = X_final.shape[0]
-    traj_list = []
-    for i in prange(n_traj):
-        traj = np.zeros((steps + 1, 2), dtype=float)
-        traj[0] = snapshots[0][i]
+    if args.plot:
+
+        # -----------------------------
+        # Plotting
+        # -----------------------------
+        def plot_snapshots_and_final_hull(snapshots, X_final, dt, title="Monte Carlo + Convex Hull"):
+            fig, ax = plt.subplots(figsize=(9, 7))
+
+            # Plot snapshots as faint clouds
+            snap_keys = sorted(snapshots.keys())
+            for k in snap_keys:
+                Xk = snapshots[k]
+                ax.scatter(Xk[:, 0], Xk[:, 1], s=3, alpha=0.06)#, label=f"t={k*dt:.2f}s" if k != snap_keys[0] else None)
+                # ax.scatter(Xk[:, 0], Xk[:, 1], s=3, alpha=0.6, label=f"t={k*dt:.2f}s" if k != snap_keys[0] else None)
+
+            # Plot final points
+            ax.scatter(X_final[:, 0], X_final[:, 1], s=6, alpha=0.18, label="final samples")
+
+            # Convex hull of final points
+            hull = convex_hull_2d(X_final)
+            if hull.shape[0] >= 3:
+                hull_closed = np.vstack([hull, hull[0]])
+                ax.plot(hull_closed[:, 0], hull_closed[:, 1], linewidth=2.5, label="final convex hull", color='k')
+            elif hull.shape[0] > 0:
+                ax.scatter(hull[:, 0], hull[:, 1], s=50, label="degenerate hull")
+
+            ax.set_xlabel("x1 (position)")
+            ax.set_ylabel("x2 (velocity)")
+            ax.set_title(title)
+            ax.grid(True)
+            ax.legend(loc="best", frameon=True)
+            plt.tight_layout()
+            
+        def plot_snapshot_hulls(hulls, dt, show_points=False, snapshots=None, title="Snapshot Hulls"):
+            """
+            hulls: dict {k: (H,2)}
+            If show_points=True, also scatter the underlying snapshot points (provide snapshots dict).
+            """
+            fig, ax = plt.subplots(figsize=(9, 7))
+
+            keys = sorted(hulls.keys())
+
+            if show_points:
+                if snapshots is None:
+                    raise ValueError("snapshots must be provided if show_points=True")
+                for k in keys:
+                    Xk = snapshots[k]
+                    ax.scatter(Xk[:, 0], Xk[:, 1], s=2, alpha=0.03)
+
+            for k in keys:
+                hull = hulls[k]
+                if hull.shape[0] >= 3:
+                    hull_closed = np.vstack([hull, hull[0]])
+                    ax.plot(hull_closed[:, 0], hull_closed[:, 1], linewidth=2.0)
+                elif hull.shape[0] == 2:
+                    ax.plot(hull[:, 0], hull[:, 1], linewidth=2.0)
+                elif hull.shape[0] == 1:
+                    ax.scatter(hull[0, 0], hull[0, 1], s=40)
+
+            ax.set_xlabel("x1 (position)")
+            ax.set_ylabel("x2 (velocity)")
+            ax.set_title(title)
+            ax.grid(True)
+            ax.legend(loc="best", frameon=True)
+            plt.tight_layout()
+
+
+        plot_snapshots_and_final_hull(
+            snapshots,
+            X_final,
+            dt,
+            title="Duffing Oscillator Reachability (Monte Carlo Trajectories)"
+        )
+
+        hulls = compute_hulls_for_snapshots(
+            snapshots,
+            downsample=8000,  # None for full set; use a number to speed up
+            seed=123
+        )
+
+        plot_snapshot_hulls(
+            hulls,
+            dt,
+            show_points=False,  # set True if you want clouds underneath
+            snapshots=snapshots,
+            title="Duffing Oscillator Reachability (Monte Carlo Convex Hulls with Nominal Trajectory)"
+        )
+        # solve nominal system for reference
+        x_nom = np.array(x0_mean, dtype=float)
+        traj_nom = np.zeros((steps + 1, 2), dtype=float)
+        traj_nom[0] = x_nom
         for k in range(steps):
-            if k in snapshots:
-                traj[k + 1] = snapshots[k][i]
-            else:
-                traj[k + 1] = traj[k]
-        traj_list.append(traj)
-    traj_list = np.array(traj_list) # n,steps,2
+            if k == 2:
+                x_nom[1] = x_nom[1] + 0.0  # nominal control is zero
+            x_nom = rk4_step(x_nom, k * dt, 0.0, dt, omega, zeta, alpha=alpha, beta=beta, gamma=gamma, total_mass=total_mass)
+            traj_nom[k + 1] = x_nom
+        # plot nominal trajectory on top of last figure
+        plt.plot(traj_nom[:, 0], traj_nom[:, 1], 'k--', linewidth=2.5, label="nominal trajectory")
+
+        plt.legend(loc="best", frameon=True)
 
 
-    # save trajectories to disk
-    np.savez(save_dir + save_file, trajectories=traj_list, dt=dt,parameters = [alpha, beta, gamma, omega,zeta,delta_v_radius],T=args.T)
+        # generate pdf for a single snapshot time (e.g. t=4s) by histogramming the points and fitting a KDE
+        snapshot_time = args.T  # seconds
+        snapshot_index = int(snapshot_time / dt)
+
+        if snapshot_index in snapshots:
+            from scipy.stats import gaussian_kde
+
+            Xk = snapshots[snapshot_index]
+            kde = gaussian_kde(Xk.T)
+
+            # Create a grid for evaluation
+            x_min, x_max = Xk[:, 0].min() - 0.5, Xk[:, 0].max() + 0.5
+            y_min, y_max = Xk[:, 1].min() - 0.5, Xk[:, 1].max() + 0.5
+            x_grid, y_grid = np.mgrid[x_min:x_max:100j, y_min:y_max:100j]
+            grid_coords = np.vstack([x_grid.ravel(), y_grid.ravel()])
+            pdf_values = kde(grid_coords).reshape(x_grid.shape)
+
+            # Plot the PDF as a contour plot with improved contrast and less clutter.
+            fig, ax = plt.subplots(figsize=(9, 7), dpi=140)
+            levels = np.quantile(pdf_values, np.linspace(0.05, 0.995, 20))
+            contourf = ax.contourf(
+                x_grid, y_grid, pdf_values, levels=levels, cmap="cividis", extend="both"
+            )
+            ax.contour(
+                x_grid,
+                y_grid,
+                pdf_values,
+                levels=levels[::3],
+                colors="k",
+                linewidths=0.5,
+                alpha=0.45,
+            )
+            cbar = fig.colorbar(contourf, ax=ax, pad=0.02)
+            cbar.set_label("PDF value", fontsize=11)
+
+            # Downsample displayed points so the KDE remains visible.
+            sample_count = min(2000, len(Xk))
+            sample_idx = np.random.choice(len(Xk), size=sample_count, replace=False)
+            ax.scatter(
+                Xk[sample_idx, 0],
+                Xk[sample_idx, 1],
+                s=8,
+                c="white",
+                edgecolors="black",
+                linewidths=0.25,
+                alpha=0.45,
+                label="samples",
+            )
+            ax.set_xlabel("x1 (position)", fontsize=11)
+            ax.set_ylabel("x2 (velocity)", fontsize=11)
+            ax.set_title(f"State PDF at t={snapshot_time:.2f}s", fontsize=12)
+            ax.grid(alpha=0.2, linestyle="--")
+            ax.legend(frameon=True, loc="upper right")
+            ax.set_aspect("equal", adjustable="box")
+            fig.tight_layout()
+            
+            
+            plt.show()
+
+    else:
+    
+        # using snapshots, construct n_traj trajectories
+        n_traj = X_final.shape[0]
+        traj_list = []
+        for i in prange(n_traj):
+            traj = np.zeros((steps + 1, 2), dtype=float)
+            traj[0] = snapshots[0][i]
+            for k in range(steps):
+                if k in snapshots:
+                    traj[k + 1] = snapshots[k][i]
+                else:
+                    traj[k + 1] = traj[k]
+            traj_list.append(traj)
+        traj_list = np.array(traj_list) # n,steps,2
+
+
+        # save trajectories to disk
+        np.savez(save_dir + save_file, trajectories=traj_list, dt=dt,parameters = [alpha, beta, gamma, omega,zeta,delta_v_radius],T=args.T)
