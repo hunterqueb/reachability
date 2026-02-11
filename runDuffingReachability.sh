@@ -1,20 +1,11 @@
 #!/bin/bash
 
-# run the reachability analysis for the Duffing system with different learning rates for lstm and mamba
-# learning rates to test
-lrs=(0.0001 0.001 0.01 0.1)
+python scripts/reachabilityDuffing.py --train-ratio 0.2 --model mamba 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --model mamba 
+python scripts/reachabilityDuffing.py --train-ratio 0.2 --model mamba --ood
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --model mamba --ood
 
-# loop over learning rates and run the reachability analysis for both models
-for lr in "${lrs[@]}"
-do
-    echo "Running reachability analysis for learning rate: $lr"
-    python3 scripts/reachabilityDuffing.py --train-ratio 0.8 --model lstm --lr $lr
-    python3 scripts/reachabilityDuffing.py --train-ratio 0.8 --model mamba --lr $lr
-done
-
-for lr in "${lrs[@]}"
-do
-    echo "Running reachability analysis for learning rate: $lr"
-    python3 scripts/reachabilityDuffing.py --train-ratio 0.2 --model lstm --lr $lr
-    python3 scripts/reachabilityDuffing.py --train-ratio 0.2 --model mamba --lr $lr
-done
+python scripts/reachabilityDuffing.py --train-ratio 0.2 --model lstm 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --model lstm 
+python scripts/reachabilityDuffing.py --train-ratio 0.2 --model lstm --ood
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --model lstm --ood
