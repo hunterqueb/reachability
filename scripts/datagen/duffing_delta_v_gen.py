@@ -160,11 +160,14 @@ def monte_carlo_reachable_set(
     steps,
     n_traj,
     snapshot_indices=(0, 200, 400, 800),
-    seed=0
+    seed=0,
+    mean_shift=None
 ):
     rng = np.random.default_rng(seed)
 
     x0_mean = np.asarray(x0_mean, dtype=float).reshape(2)
+    if mean_shift is not None:
+        x0_mean = x0_mean + np.asarray(mean_shift, dtype=float).reshape(2)
     rad = np.asarray(x0_box_radius, dtype=float).reshape(2)
 
     snapshot_indices = tuple(int(i) for i in snapshot_indices if 0 <= i <= steps)
@@ -215,7 +218,7 @@ def monte_carlo_reachable_set(
             X_final[i] = x
 
     snapshots = {int(k): snapshots_arr[idx] for idx, k in enumerate(snapshot_indices)}
-    return snapshots, X_final
+    return snapshots, X_final, delta_v
 
 
 
@@ -266,6 +269,7 @@ if __name__ == "__main__":
     parser.add_argument("--dt", type=float, default=0.02, help="Time step for integration")
     parser.add_argument("--n", type=int, default=20000, help="Number of Monte Carlo trajectories to simulate")
     parser.add_argument("--plot", action="store_true", help="Set this flag to plot the snapshots and hulls instead of saving data")
+    parser.add_argument("--ood",action="store_true", help="Set this flag to generate OOD data with larger deltaV")
     if parser.parse_args().no_numba:
         _HAVE_NUMBA = False
     args = parser.parse_args()
@@ -292,7 +296,7 @@ if __name__ == "__main__":
     for i in range(1, zoneNums + 1):
         snapshot_indices.append(int(i * steps / zoneNums))
 
-    snapshots, X_final = monte_carlo_reachable_set(
+    snapshots, X_final, delta_v = monte_carlo_reachable_set(
         x0_mean=x0_mean,
         x0_box_radius=x0_box_radius,
         omega=omega,
@@ -308,6 +312,44 @@ if __name__ == "__main__":
         snapshot_indices=snapshot_indices,
         seed=1
     )
+
+    if args.ood:
+        x0_mean_ood = [0.5, 0.0]  # shift initial condition for OOD
+        x0_box_radius_ood = [0.3, 0.3]  # increase initial condition uncertainty for OOD
+        # Generate OOD data with larger deltaV
+        delta_v_radius_ood = delta_v_radius * 2.0  # increase radius for OOD
+        snapshots_ood, X_final_ood, delta_v_ood = monte_carlo_reachable_set(
+            x0_mean=x0_mean_ood,
+            x0_box_radius=x0_box_radius_ood,
+            omega=omega,
+            zeta=zeta,
+            alpha=alpha,
+            beta=beta,
+            gamma=gamma,
+            total_mass=total_mass,
+            delta_v_radius=delta_v_radius_ood,
+            dt=dt,
+            steps=steps,
+            n_traj=n_traj,
+            snapshot_indices=snapshot_indices,
+            seed=2,
+            mean_shift=[0.2, 0.2]
+        )
+
+        # using snapshots, construct n_traj trajectories
+        n_traj = X_final_ood.shape[0]
+        traj_list = []
+        for i in prange(n_traj):
+            traj = np.zeros((steps + 1, 2), dtype=float)
+            traj[0] = snapshots_ood[0][i]
+            for k in range(steps):
+                if k in snapshots_ood:
+                    traj[k + 1] = snapshots_ood[k][i]
+                else:
+                    traj[k + 1] = traj[k]
+            traj_list.append(traj)
+        traj_list = np.array(traj_list) # n,steps,2
+
     if args.plot:
 
         # -----------------------------
@@ -410,6 +452,37 @@ if __name__ == "__main__":
         plt.legend(loc="best", frameon=True)
 
 
+        if args.ood:
+            # plot ood snapshots and hulls in separate figures
+            plot_snapshots_and_final_hull(
+                snapshots_ood,
+                X_final_ood,
+                dt,
+                title="Duffing Oscillator Reachability (OOD Monte Carlo Trajectories)"
+            )
+            # plot ood initial condition band with in distrobution initial condition band
+            fig, ax = plt.subplots(figsize=(9, 7))
+            ax.scatter(snapshots[0][:, 0], snapshots[0][:, 1], s=3, alpha=0.06, label="in-dist initial samples")
+            ax.scatter(snapshots_ood[0][:, 0], snapshots_ood[0][:, 1], s=3, alpha=0.06, label="OOD initial samples")
+            ax.set_xlabel("x1 (position)")
+            ax.set_ylabel("x2 (velocity)")
+            ax.set_title("Initial Condition Distribution Comparison")
+            ax.grid(True)
+            ax.legend(loc="best", frameon=True)
+            plt.tight_layout() 
+
+            # same plot but 3d including deltaV dimension
+            fig = plt.figure(figsize=(9, 7))
+            ax = fig.add_subplot(111, projection='3d')
+            ax.scatter(snapshots[0][:, 0], snapshots[0][:, 1], delta_v, s=3, alpha=0.06, label="in-dist samples")
+            ax.scatter(snapshots_ood[0][:, 0], snapshots_ood[0][:, 1], delta_v_ood, s=3, alpha=0.06, label="OOD samples")
+            ax.set_xlabel("x1 (position)")
+            ax.set_ylabel("x2 (velocity)")
+            ax.set_zlabel("deltaV")
+            ax.set_title("Initial Condition + DeltaV Distribution Comparison")
+            ax.grid(True)
+            ax.legend(loc="best", frameon=True)
+            plt.tight_layout()
         # generate pdf for a single snapshot time (e.g. t=4s) by histogramming the points and fitting a KDE
         snapshot_time = args.T  # seconds
         snapshot_index = int(snapshot_time / dt)
@@ -485,6 +558,8 @@ if __name__ == "__main__":
             traj_list.append(traj)
         traj_list = np.array(traj_list) # n,steps,2
 
+        # Save OOD data
+        np.savez(save_dir + f"duffing_monte_carlo_trajectories_dv_{delta_v_radius}_dt_{args.dt}_n_{args.n}_ood.npz", trajectories=traj_list, dt=dt, parameters=[alpha, beta, gamma, omega, zeta], delta_v=delta_v_radius_ood, T=args.T)
 
         # save trajectories to disk
-        np.savez(save_dir + save_file, trajectories=traj_list, dt=dt,parameters = [alpha, beta, gamma, omega,zeta,delta_v_radius],T=args.T)
+        np.savez(save_dir + save_file, trajectories=traj_list, dt=dt,parameters = [alpha, beta, gamma, omega,zeta],delta_v=delta_v_radius,T=args.T)
