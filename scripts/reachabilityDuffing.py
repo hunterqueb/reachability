@@ -1,10 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 import torch
 import torch.nn.functional as F
 import torch.utils.data as data
 import argparse
-from scipy.spatial import ConvexHull, Delaunay
+from scipy.spatial import ConvexHull, Delaunay, QhullError
 
 from qutils.ml.utils import printModelParmSize, getDevice, Adam_mini
 from qutils.tictoc import timer
@@ -30,6 +31,7 @@ parser.add_argument('--batch', type=int, default=256, help='Batch size for train
 parser.add_argument('--batch-test', type=int, default=128, help='Batch size for evaluation')
 parser.add_argument('--n-epochs', type=int, default=10, help='Number of training epochs')
 parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for training')
+parser.add_argument('--ood', action='store_true', help='Whether to evaluate on OOD data with larger deltaV')
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
@@ -119,7 +121,63 @@ def returnModel(modelString = 'mamba'):
     printModelParmSize(model)
     return model
 
+def alpha_shape_segments_and_area(points, radius_quantile=0.65):
+    n = points.shape[0]
+    if n < 4:
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    try:
+        tri = Delaunay(points)
+    except QhullError:
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    simplices = tri.simplices
+    p = points[simplices]
+    a = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
+    b = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
+    c = np.linalg.norm(p[:, 0] - p[:, 2], axis=1)
+    s = 0.5 * (a + b + c)
+    area_sq = s * (s - a) * (s - b) * (s - c)
+    area_sq = np.maximum(area_sq, 0.0)
+    tri_area = np.sqrt(area_sq)
+
+    valid = tri_area > 1e-12
+    if not np.any(valid):
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    circum_r = np.full_like(tri_area, np.inf)
+    circum_r[valid] = (a[valid] * b[valid] * c[valid]) / (4.0 * tri_area[valid])
+    r_thresh = np.quantile(circum_r[valid], radius_quantile)
+    keep = valid & (circum_r <= r_thresh)
+
+    if not np.any(keep):
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    kept = simplices[keep]
+    edges = np.concatenate(
+        [kept[:, [0, 1]], kept[:, [1, 2]], kept[:, [2, 0]]],
+        axis=0
+    )
+    edges = np.sort(edges, axis=1)
+    uniq_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary_edges = uniq_edges[counts == 1]
+
+    return points[boundary_edges], tri_area[keep].sum()
+
 model = returnModel(modelString)
+modelString = modelString + '_ood' if args.ood else modelString
 
 optimizer = Adam_mini(model,lr=lr)
 
@@ -176,6 +234,17 @@ for epoch in range(n_epochs):
 
 trainTime.toc()
 
+
+if args.ood:
+    # Load OOD test data with larger deltaV
+    ood_dataFile = './data/test/duffing_monte_carlo_trajectories_dv_{}_dt_{}_n_{}_ood.npz'.format(args.dv*2, args.dt, args.n)
+    ood_system_data = np.load(ood_dataFile, allow_pickle=True)
+    ood_trajs = ood_system_data['trajectories']
+    ood_trajs_t = np.transpose(ood_trajs, (1, 0, 2))
+    ood_numericResult = ood_trajs_t
+
+    # Create OOD test dataset
+    _, _, test_in, test_out = create_datasets(ood_numericResult, 1, train_size, device)
 # plot some predictions
 model.eval()
 with torch.no_grad():
@@ -242,35 +311,33 @@ with torch.no_grad():
     plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}_lr_{lr}.png')
     plt.close()
 
-    # convex hulls of final states (predicted vs true)
     final_true = test_out[-1].numpy()
     final_pred = test_pred_full[-1].numpy()
 
-    hull_true = ConvexHull(final_true)
-    hull_pred = ConvexHull(final_pred)
+    true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
+    pred_segments, area_pred = alpha_shape_segments_and_area(final_pred,radius_quantile=0.95)
 
-    # calculate hull areas and find ratio of pred hull area to true hull area
-    area_true = hull_true.volume
-    area_pred = hull_pred.volume
+    # calculate reachable-set areas and find ratio of pred area to true area
+    area_true = float(area_true)
+    area_pred = float(area_pred)
 
     area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
 
-    print(f"True Hull Area: {area_true:.4f}, Pred Hull Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
+    print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
 
     plt.figure()
     plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
     plt.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
+    ax = plt.gca()
+    ax.add_collection(LineCollection(true_segments, colors='k', linewidths=2, label='True Alpha Shape'))
+    ax.add_collection(LineCollection(pred_segments, colors='r', linewidths=2, linestyles='--', label='Pred Alpha Shape'))
+    ax.autoscale_view()
 
-    true_poly = np.append(hull_true.vertices, hull_true.vertices[0])
-    pred_poly = np.append(hull_pred.vertices, hull_pred.vertices[0])
-    plt.plot(final_true[true_poly, 0], final_true[true_poly, 1], 'k-', lw=2, label='True Hull')
-    plt.plot(final_pred[pred_poly, 0], final_pred[pred_poly, 1], 'r--', lw=2, label='Pred Hull')
-
-    plt.title(modelString + ' Final-State Convex Hulls: Area Ratio {:.4f}'.format(area_ratio))
+    plt.title(modelString + ' Final-State Alpha Shapes: Area Ratio {:.4f}'.format(area_ratio))
     plt.xlabel('x1')
     plt.ylabel('x2')
     plt.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_hulls_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
+    plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
     plt.close()
 
     plt.figure()
