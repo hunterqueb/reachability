@@ -262,7 +262,7 @@ if __name__ == "__main__":
     # args parse for delta v_radius
     import argparse
     parser = argparse.ArgumentParser(description="Duffing Oscillator Monte Carlo Reachability")
-    parser.add_argument("--deltaV", type=float, default=0.3, help="Radius of delta-v perturbation at control time")
+    parser.add_argument("--dv", type=float, default=0.3, help="Radius of delta-v perturbation at control time")
     parser.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
     parser.add_argument("--steps", type=int, default=100, help="Number of snapshots to compute")
     parser.add_argument("--T", type=float, default=16.0, help="Total simulation time in seconds")
@@ -273,7 +273,7 @@ if __name__ == "__main__":
     if parser.parse_args().no_numba:
         _HAVE_NUMBA = False
     args = parser.parse_args()
-    delta_v_radius = args.deltaV
+    delta_v_radius = args.dv
 
     save_dir = "./data/test/"
     save_file = f"duffing_monte_carlo_trajectories_dv_{delta_v_radius}_dt_{args.dt}_n_{args.n}.npz"
@@ -338,7 +338,7 @@ if __name__ == "__main__":
 
         # using snapshots, construct n_traj trajectories
         n_traj = X_final_ood.shape[0]
-        traj_list = []
+        traj_list_ood = []
         for i in prange(n_traj):
             traj = np.zeros((steps + 1, 2), dtype=float)
             traj[0] = snapshots_ood[0][i]
@@ -347,8 +347,8 @@ if __name__ == "__main__":
                     traj[k + 1] = snapshots_ood[k][i]
                 else:
                     traj[k + 1] = traj[k]
-            traj_list.append(traj)
-        traj_list = np.array(traj_list) # n,steps,2
+            traj_list_ood.append(traj)
+        traj_list_ood = np.array(traj_list_ood) # n,steps,2
 
     if args.plot:
 
@@ -558,8 +558,9 @@ if __name__ == "__main__":
             traj_list.append(traj)
         traj_list = np.array(traj_list) # n,steps,2
 
+        if args.ood:
         # Save OOD data
-        np.savez(save_dir + f"duffing_monte_carlo_trajectories_dv_{delta_v_radius}_dt_{args.dt}_n_{args.n}_ood.npz", trajectories=traj_list, dt=dt, parameters=[alpha, beta, gamma, omega, zeta], delta_v=delta_v_radius_ood, T=args.T)
+            np.savez(save_dir + f"duffing_monte_carlo_trajectories_dv_{delta_v_radius_ood}_dt_{args.dt}_n_{args.n}_ood.npz", trajectories=traj_list_ood, dt=dt, parameters=[alpha, beta, gamma, omega, zeta], delta_v=delta_v_radius_ood, T=args.T)
 
         # save trajectories to disk
         np.savez(save_dir + save_file, trajectories=traj_list, dt=dt,parameters = [alpha, beta, gamma, omega,zeta],delta_v=delta_v_radius,T=args.T)
