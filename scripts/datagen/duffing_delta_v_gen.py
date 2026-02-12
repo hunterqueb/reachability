@@ -462,8 +462,8 @@ if __name__ == "__main__":
             )
             # plot ood initial condition band with in distrobution initial condition band
             fig, ax = plt.subplots(figsize=(9, 7))
-            ax.scatter(snapshots[0][:, 0], snapshots[0][:, 1], s=3, alpha=0.06, label="in-dist initial samples")
-            ax.scatter(snapshots_ood[0][:, 0], snapshots_ood[0][:, 1], s=3, alpha=0.06, label="OOD initial samples")
+            ax.scatter(snapshots[0][:, 0], snapshots[0][:, 1], s=3, alpha=0.2, label="in-dist initial samples")
+            ax.scatter(snapshots_ood[0][:, 0], snapshots_ood[0][:, 1], s=3, alpha=0.2, label="OOD initial samples")
             ax.set_xlabel("x1 (position)")
             ax.set_ylabel("x2 (velocity)")
             ax.set_title("Initial Condition Distribution Comparison")

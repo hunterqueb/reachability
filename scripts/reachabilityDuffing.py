@@ -16,7 +16,6 @@ from qutils.ml.utils import findDecAcc
 #import for superweight identification
 from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSuperWeight, findMambaSuperActivation,plotSuperActivation
 
-# from nets import Adam_mini
 
 # args parsing for model, horizon, traj_index
 parser = argparse.ArgumentParser()
