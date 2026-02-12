@@ -5,7 +5,9 @@ import torch
 import torch.nn.functional as F
 import torch.utils.data as data
 import argparse
-from scipy.spatial import ConvexHull, Delaunay, QhullError
+from scipy.spatial import ConvexHull, Delaunay
+from scipy.spatial.qhull import QhullError # import here for p36 compatibility
+
 
 from qutils.ml.utils import printModelParmSize, getDevice, Adam_mini
 from qutils.tictoc import timer
@@ -31,6 +33,7 @@ parser.add_argument('--batch-test', type=int, default=128, help='Batch size for 
 parser.add_argument('--n-epochs', type=int, default=10, help='Number of training epochs')
 parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for training')
 parser.add_argument('--ood', action='store_true', help='Whether to evaluate on OOD data with larger deltaV')
+parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
@@ -78,7 +81,11 @@ def create_datasets(data, seq_length, train_size, device):
     test_time = data[horizon:time_end - horizon]
 
     train_data = train_time[:, :split_idx, :]
-    test_data = test_time[:, split_idx:, :]
+    if args.jetson: 
+        # for jetson testing, use smaller test set to reduce memory requirements for test loss evaluation
+        test_data = test_time[:, split_idx:split_idx+1000, :]
+    else:
+        test_data = test_time[:, split_idx:, :]
 
     def build_xy(d):
         xs, ys = [], []

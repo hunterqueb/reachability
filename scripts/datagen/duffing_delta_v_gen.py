@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.spatial import ConvexHull, Delaunay,QhullError
+from scipy.spatial import ConvexHull, Delaunay
+from scipy.spatial.qhull import QhullError # import here for p36 compatibility
 from matplotlib.collections import LineCollection
 
 try:
