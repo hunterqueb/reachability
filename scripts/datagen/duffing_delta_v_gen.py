@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-
+from scipy.spatial import ConvexHull, Delaunay,QhullError
+from matplotlib.collections import LineCollection
 
 try:
     from numba import njit, prange
@@ -142,6 +143,72 @@ def convex_hull_2d(points):
     hull = lower[:-1] + upper[:-1]
     return np.array(hull, dtype=float)
 
+# -----------------------------
+# Alpha shape segments and area (for 2D point clouds, to get a tighter hull than convex hull)
+# -----------------------------
+def alpha_shape_segments_and_area(points, radius_quantile=0.65):
+    n = points.shape[0]
+    if n < 4:
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    try:
+        tri = Delaunay(points)
+    except QhullError:
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    simplices = tri.simplices
+    p = points[simplices]
+    a = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
+    b = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
+    c = np.linalg.norm(p[:, 0] - p[:, 2], axis=1)
+    s = 0.5 * (a + b + c)
+    area_sq = s * (s - a) * (s - b) * (s - c)
+    area_sq = np.maximum(area_sq, 0.0)
+    tri_area = np.sqrt(area_sq)
+
+    valid = tri_area > 1e-12
+    if not np.any(valid):
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    circum_r = np.full_like(tri_area, np.inf)
+    circum_r[valid] = (a[valid] * b[valid] * c[valid]) / (4.0 * tri_area[valid])
+    r_thresh = np.quantile(circum_r[valid], radius_quantile)
+    keep = valid & (circum_r <= r_thresh)
+
+    if not np.any(keep):
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    kept = simplices[keep]
+    edges = np.concatenate(
+        [kept[:, [0, 1]], kept[:, [1, 2]], kept[:, [2, 0]]],
+        axis=0
+    )
+    edges = np.sort(edges, axis=1)
+    uniq_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary_edges = uniq_edges[counts == 1]
+
+    return points[boundary_edges], tri_area[keep].sum()
+
+def plot_alpha_shape(points, k, radius_quantile=0.95,ax=None):
+    segs, area = alpha_shape_segments_and_area(points, radius_quantile)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(points[:, 0], points[:, 1], s=5, alpha=0.03)
+    lc = LineCollection(segs, linewidths=2,colors="C"+str(k%10))
+    ax.add_collection(lc)
+    plt.tight_layout()
 
 # -----------------------------
 # Monte Carlo reachability
@@ -356,7 +423,7 @@ if __name__ == "__main__":
         # Plotting
         # -----------------------------
         def plot_snapshots_and_final_hull(snapshots, X_final, dt, title="Monte Carlo + Convex Hull"):
-            fig, ax = plt.subplots(figsize=(9, 7))
+            fig, ax = plt.subplots(figsize=(8, 6))
 
             # Plot snapshots as faint clouds
             snap_keys = sorted(snapshots.keys())
@@ -368,13 +435,9 @@ if __name__ == "__main__":
             # Plot final points
             ax.scatter(X_final[:, 0], X_final[:, 1], s=6, alpha=0.18, label="final samples")
 
-            # Convex hull of final points
-            hull = convex_hull_2d(X_final)
-            if hull.shape[0] >= 3:
-                hull_closed = np.vstack([hull, hull[0]])
-                ax.plot(hull_closed[:, 0], hull_closed[:, 1], linewidth=2.5, label="final convex hull", color='k')
-            elif hull.shape[0] > 0:
-                ax.scatter(hull[:, 0], hull[:, 1], s=50, label="degenerate hull")
+            # get alpha shape hull for final points and plot
+            hull_final, area_final = alpha_shape_segments_and_area(X_final, radius_quantile=0.95)
+            ax.add_collection(LineCollection(hull_final, linewidths=2, colors='k', label=f"final hull (area={area_final:.2f})"))
 
             ax.set_xlabel("x1 (position)")
             ax.set_ylabel("x2 (velocity)")
@@ -388,7 +451,7 @@ if __name__ == "__main__":
             hulls: dict {k: (H,2)}
             If show_points=True, also scatter the underlying snapshot points (provide snapshots dict).
             """
-            fig, ax = plt.subplots(figsize=(9, 7))
+            fig, ax = plt.subplots(figsize=(8, 6))
 
             keys = sorted(hulls.keys())
 
@@ -448,20 +511,33 @@ if __name__ == "__main__":
             traj_nom[k + 1] = x_nom
         # plot nominal trajectory on top of last figure
         plt.plot(traj_nom[:, 0], traj_nom[:, 1], 'k--', linewidth=2.5, label="nominal trajectory")
-
         plt.legend(loc="best", frameon=True)
 
+        fig, ax = plt.subplots(figsize=(8, 6))
+        # plot snapshot alpha shapes
+        for i, k in enumerate(snapshot_indices):
+            plot_alpha_shape(snapshots[k],i, ax=ax, radius_quantile=0.95)
+        ax.set_xlabel("x1 (position)")
+        ax.set_ylabel("x2 (velocity)")
+        ax.set_title("Duffing Oscillator Reachability (Monte Carlo Alpha Shapes)")
+        ax.grid(True)
+        plt.plot(traj_nom[:, 0], traj_nom[:, 1], 'k--', linewidth=2.5, label="nominal trajectory")
 
+        
         if args.ood:
             # plot ood snapshots and hulls in separate figures
-            plot_snapshots_and_final_hull(
-                snapshots_ood,
-                X_final_ood,
-                dt,
-                title="Duffing Oscillator Reachability (OOD Monte Carlo Trajectories)"
-            )
+            
+            fig, ax = plt.subplots(figsize=(8, 6))
+            # plot snapshot alpha shapes
+            for i, k in enumerate(snapshot_indices):
+                plot_alpha_shape(snapshots_ood[k],i, ax=ax, radius_quantile=0.95)
+            ax.set_xlabel("x1 (position)")
+            ax.set_ylabel("x2 (velocity)")
+            ax.set_title("Duffing Oscillator Reachability (Monte Carlo Alpha Shapes)")
+            ax.grid(True)
+
             # plot ood initial condition band with in distrobution initial condition band
-            fig, ax = plt.subplots(figsize=(9, 7))
+            fig, ax = plt.subplots(figsize=(8, 6))
             ax.scatter(snapshots[0][:, 0], snapshots[0][:, 1], s=3, alpha=0.2, label="in-dist initial samples")
             ax.scatter(snapshots_ood[0][:, 0], snapshots_ood[0][:, 1], s=3, alpha=0.2, label="OOD initial samples")
             ax.set_xlabel("x1 (position)")
@@ -472,7 +548,7 @@ if __name__ == "__main__":
             plt.tight_layout() 
 
             # same plot but 3d including deltaV dimension
-            fig = plt.figure(figsize=(9, 7))
+            fig = plt.figure(figsize=(8, 6))
             ax = fig.add_subplot(111, projection='3d')
             ax.scatter(snapshots[0][:, 0], snapshots[0][:, 1], delta_v, s=3, alpha=0.06, label="in-dist samples")
             ax.scatter(snapshots_ood[0][:, 0], snapshots_ood[0][:, 1], delta_v_ood, s=3, alpha=0.06, label="OOD samples")
@@ -501,7 +577,7 @@ if __name__ == "__main__":
             pdf_values = kde(grid_coords).reshape(x_grid.shape)
 
             # Plot the PDF as a contour plot with improved contrast and less clutter.
-            fig, ax = plt.subplots(figsize=(9, 7), dpi=140)
+            fig, ax = plt.subplots(figsize=(8, 6), dpi=140)
             levels = np.quantile(pdf_values, np.linspace(0.05, 0.995, 20))
             contourf = ax.contourf(
                 x_grid, y_grid, pdf_values, levels=levels, cmap="cividis", extend="both"
