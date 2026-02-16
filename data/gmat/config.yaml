@@ -1,0 +1,19 @@
+
+orbit_type: leo
+numMinsToProp: 100
+num_runs: 800
+
+lowerAlt: 300 # km (min altitude of periapsis)
+upperAlt: 400 # km (max altitude of periapsis)
+eccentricity: 0.01 # eccentricity of the orbit
+inclination: 180 # degrees (angle between the orbital plane and the equatorial plane)
+RAAN: 180 # degrees (Right Ascension of Ascending Node)
+argPeriapsis: 180 # degrees (argument of periapsis, angle from the ascending node to the periapsis)
+trueAnomaly: 180 # degrees (angle from the periapsis to the current position of the spacecraft)
+trueAnomaly_spread: 180 # degrees (spread of true anomaly around the mean value)
+
+deltaV: 0.05 # km/s (change in velocity for the thrust maneuver)
+chemThrust: 10 # coeff for chem thrust force polynomial (N)
+elecThrust: 0.1 # scaling coeff for elec thrust force (N)
+
+# Chemical thruster is: Aerojet Rocketdyne MR- 106L, and the electrical thruster is: SPT-100
