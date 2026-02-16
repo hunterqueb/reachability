@@ -289,6 +289,30 @@ for epoch in range(n_epochs):
     print("Epoch %d: train loss %.4f, test loss %.4f\n" % (epoch, train_loss, test_loss))
 
 trainTime.toc()
+
+
+if args.ood:
+    # Load OOD test data with larger deltaV
+    ood_dataFile = "./data/gmat/5km-{}".format(args.n)
+    dataset_file = "/statesArrayImpBurn.npy"
+
+    ood_system_data = np.load(ood_dataFile + dataset_file, allow_pickle=True)
+    ood_trajs = ood_system_data['statesArrayImpBurn']
+    
+    # convert to nondim for better ML -- turn off with args
+    if not args.dim:
+        for i in range(num_trajs):
+            ood_trajs[i,:,:]=dim2NonDim6(ood_trajs[i,:,:])
+
+
+    ood_trajs_t = np.transpose(ood_trajs, (1, 0, 2))
+    ood_numericResult = ood_trajs_t
+
+    # Create OOD test dataset
+    _, _, test_in, test_out = create_datasets(ood_numericResult, 1, train_size, device)
+
+
+
 # plot some predictions
 model.eval()
 with torch.no_grad():
