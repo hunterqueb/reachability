@@ -51,7 +51,7 @@ input_size = problemDim
 output_size = problemDim
 num_layers = 1
 lookback = 1
-horizon = 5
+horizon = args.horizon
 
 
 # load data
