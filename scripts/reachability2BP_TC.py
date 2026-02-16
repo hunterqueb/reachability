@@ -32,6 +32,8 @@ parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for tr
 parser.add_argument('--ood', action='store_true', help='Whether to evaluate on OOD data with larger deltaV')
 parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
 parser.add_argument('--dim',action="store_true",help="train WITHOUT non dimensional coordinates")
+parser.add_argument('--dv',type=float,default=5,help="amount of delta v used for picking dataset")
+parser.add_argument('--n',type=int,default=10000,help='amount of trajectories used for picking dataset')
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
@@ -52,15 +54,17 @@ horizon = args.horizon
 
 
 # import gmat dataset
-dataset_loc = "./data/gmat/statesArrayImpBurn_100min_800.npy"
+dataset_loc = "./data/gmat/{}km-{}".format(args.dv,args.n)
+dataset_file = "/statesArrayImpBurn.npy"
 
-dataset = np.load(dataset_loc)["statesArrayImpBurn"] # (n_traj,min_prop,problemDim)
+dataset = np.load(dataset_loc+dataset_file)["statesArrayImpBurn"] # (n_traj,min_prop,problemDim)
 num_trajs = dataset.shape[0]
 num_time_steps = dataset.shape[1]
 
-# convert to nondim for better ML
-for i in range(num_trajs):
-    dataset[i,:,:]=dim2NonDim6(dataset[i,:,:])
+# convert to nondim for better ML -- turn off with args
+if not args.dim:
+    for i in range(num_trajs):
+        dataset[i,:,:]=dim2NonDim6(dataset[i,:,:])
 
 trajs_t = np.transpose(dataset, (1, 0, 2))  # (num_time_steps, num_trajectories, problemDim)
 numericResult = trajs_t
@@ -336,6 +340,12 @@ with torch.no_grad():
 
     true_test_seq = build_full_seq(test_in, test_out, traj_idx)
     pred_test_seq = build_full_seq(test_in, test_pred_full, traj_idx)
+
+    # convert to dim for plotting
+    if not args.dim:
+        true_test_seq=nonDim2Dim6(true_test_seq)
+        pred_test_seq=nonDim2Dim6(pred_test_seq)
+
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     # color train and test segments differently
@@ -347,12 +357,13 @@ with torch.no_grad():
     else:
         true_z = np.zeros(true_test_seq.shape[0])
         pred_z = np.zeros(pred_test_seq.shape[0])
+
     ax.plot(true_test_seq[:, 0], true_test_seq[:, 1], true_z, 'k-', label='True Trajectory')
     ax.plot(pred_test_seq[:, 0], pred_test_seq[:, 1], pred_z, '--', label='Predicted Trajectory')
     ax.set_title(modelString+' Reachability Prediction: Trajectory Index '+str(traj_idx))
-    ax.set_xlabel('x1')
-    ax.set_ylabel('x2')
-    ax.set_zlabel('x3')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_zlabel('z')
     ax.legend(loc='best')
     # save plot
     plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}_lr_{lr}.png')
@@ -360,6 +371,11 @@ with torch.no_grad():
 
     final_true = test_out[-1].numpy()
     final_pred = test_pred_full[-1].numpy()
+
+    if not args.dim:
+        final_true=nonDim2Dim6(final_true)
+        final_pred=nonDim2Dim6(final_pred)
+
 
     if final_true.shape[1] == 6:
         pos_true = final_true[:, :3]
@@ -432,9 +448,9 @@ with torch.no_grad():
                     label='Pred Alpha Shape' if i == 0 else None)
 
         ax.set_title(modelString + ' Final-State Alpha Shapes: Area Ratio {:.4f}'.format(area_ratio))
-        ax.set_xlabel('x1')
-        ax.set_ylabel('x2')
-        ax.set_zlabel('x3')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
         ax.legend(loc='best')
         plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
         plt.close()
@@ -447,9 +463,9 @@ with torch.no_grad():
     ax.scatter(final_pred[:, 0], final_pred[:, 1], pred_z, s=6, alpha=0.4, label='Pred Final States')
 
     ax.set_title(modelString + ' Final-State Points')
-    ax.set_xlabel('x1')
-    ax.set_ylabel('x2')
-    ax.set_zlabel('x3')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.set_zlabel('z')
     ax.legend(loc='best')
     plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
     plt.close()
