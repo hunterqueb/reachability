@@ -1,0 +1,16 @@
+
+orbit_type: heo
+numMinsToProp: 30
+num_runs: 10000
+
+lowerAlt: 150 # km (min altitude of periapsis)
+upperAlt: 200 # km (max altitude of periapsis)
+eccentricity: 0.6 # eccentricity of the orbit
+inclination: 10 # degrees (angle between the orbital plane and the equatorial plane)
+RAAN: 10 # degrees (Right Ascension of Ascending Node)
+argPeriapsis: 10 # degrees (argument of periapsis, angle from the ascending node to the periapsis)
+trueAnomaly: 5 # degrees (angle from the periapsis to the current position of the spacecraft)
+
+deltaV: 2 # km/s (change in velocity for the thrust maneuver)
+chemThrust: 10 # coeff for chem thrust force polynomial
+elecThrust: .5 # scaling coeff for elec thrust force
