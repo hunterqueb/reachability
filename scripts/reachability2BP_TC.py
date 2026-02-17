@@ -32,7 +32,7 @@ parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for tr
 parser.add_argument('--ood', action='store_true', help='Whether to evaluate on OOD data with larger deltaV')
 parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
 parser.add_argument('--dim',action="store_true",help="train WITHOUT non dimensional coordinates")
-parser.add_argument('--dv',type=float,default=5,help="amount of delta v used for picking dataset")
+parser.add_argument('--dv',type=float,default=5.0,help="amount of delta v used for picking dataset")
 parser.add_argument('--n',type=int,default=10000,help='amount of trajectories used for picking dataset')
 args = parser.parse_args()
 modelString = args.model
@@ -54,7 +54,7 @@ horizon = args.horizon
 
 
 # import gmat dataset
-dataset_loc = "./data/gmat/{}km-{}".format(args.dv,args.n)
+dataset_loc = f"./data/gmat/{args.dv}km-{args.n}"
 dataset_file = "/statesArrayImpBurn.npy"
 
 dataset = np.load(dataset_loc+dataset_file)["statesArrayImpBurn"] # (n_traj,min_prop,problemDim)
@@ -293,7 +293,7 @@ trainTime.toc()
 
 if args.ood:
     # Load OOD test data with larger deltaV
-    ood_dataFile = "./data/gmat/5km-{}".format(args.n)
+    ood_dataFile = "./data/gmat/5.0km-{}".format(args.n)
     dataset_file = "/statesArrayImpBurn.npy"
 
     ood_system_data = np.load(ood_dataFile + dataset_file, allow_pickle=True)
