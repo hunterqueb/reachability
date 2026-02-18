@@ -200,8 +200,8 @@ max_r = max([np.sqrt(np.nanmax(x*x + y*y + z*z)) for _, (x, y, z) in orbits] + [
 lim = 1.05 * max_r
 ax.set(xlim=(-lim, lim), ylim=(-lim, lim), zlim=(-lim, lim))
 legend_lines = [
-    Line2D([0], [0], color=front_kw["Impulsive"]["color"], lw=1.8),
     Line2D([0], [0], color="#E24A33", lw=2.2),
+    Line2D([0], [0], color=front_kw["Impulsive"]["color"], lw=1.8),
 ]
 ax.legend(legend_lines, [f"Training region (first {train_steps} minutes)","Testing Region"], loc="upper right")
 plt.tight_layout()
