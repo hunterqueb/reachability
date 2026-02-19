@@ -493,6 +493,31 @@ with torch.no_grad():
     ax.legend(loc='best')
     plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
     plt.close()
+    # Plot one random test trajectory: predicted vs true across time
+    rng = np.random.default_rng(12)
+    rand_traj_idx = rng.integers(0, test_in.shape[1])
+    traj_true = build_full_seq(test_in, test_out, rand_traj_idx)
+    traj_pred = build_full_seq(test_in, test_pred_full, rand_traj_idx)
+    time_axis = np.arange(traj_true.shape[0]) * 60.0  # Assuming 60s time step
+
+    traj_true=nonDim2Dim6(traj_true)
+    traj_pred=nonDim2Dim6(traj_pred)
+
+
+    fig = plt.figure(figsize=(8, 6))
+    labels = ['x', 'y', 'z', 'vx', 'vy', 'vz']
+    for i in range(problemDim):
+        ax = fig.add_subplot(3, 2, i + 1)
+        ax.plot(time_axis, traj_true[:, i], 'k-', lw=1.5, label='True')
+        ax.plot(time_axis, traj_pred[:, i], 'r--', lw=1.5, label='Predicted')
+        ax.set_xlabel('time [s]')
+        ax.set_ylabel(labels[i])
+        if i == 0:
+            ax.legend(loc='best')
+    fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
+    plt.tight_layout()
+    plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}.png')
+    plt.close()
 
     if modelString == 'mamba':
         xb, yb = next(iter(test_loader))

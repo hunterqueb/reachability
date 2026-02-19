@@ -487,3 +487,29 @@ fig.suptitle(modelString + ' Final-State 3D Alpha Shapes')
 plt.tight_layout()
 plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
 plt.close()
+# Plot one random test trajectory: predicted vs true across time
+rng = np.random.default_rng(args.seed)
+rand_traj_idx = int(rng.integers(0, Nts))
+
+y_pred_test_den = denorm(y_pred_test).numpy().reshape(Wte, Nts, problemDim)
+y_true_test_den = denorm(y_true_test).numpy().reshape(Wte, Nts, problemDim)
+
+traj_pred = y_pred_test_den[:, rand_traj_idx, :]
+traj_true = y_true_test_den[:, rand_traj_idx, :]
+target_time_idx = np.arange(lookback + horizon - 1, lookback + horizon - 1 + Wte)
+time_axis = t[target_time_idx] if target_time_idx[-1] < len(t) else np.arange(Wte) * dt
+
+fig = plt.figure(figsize=(8, 6))
+labels = ['x', 'y', 'z', 'vx', 'vy', 'vz']
+for i in range(problemDim):
+    ax = fig.add_subplot(3, 2, i + 1)
+    ax.plot(time_axis, traj_true[:, i], 'k-', lw=1.5, label='True')
+    ax.plot(time_axis, traj_pred[:, i], 'r--', lw=1.5, label='Predicted')
+    ax.set_xlabel('time [s]')
+    ax.set_ylabel(labels[i])
+    if i == 0:
+        ax.legend(loc='best')
+fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
+plt.tight_layout()
+plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}.png')
+plt.close()
