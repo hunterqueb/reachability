@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import torch
 import torch.nn.functional as F
 import torch.utils.data as data
@@ -20,26 +20,24 @@ from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSupe
 
 # args parsing for model, horizon, traj_index
 parser = argparse.ArgumentParser()
-# args parsing for model, horizon, traj_index
-parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='lstm', help='Model to use')
 parser.add_argument('--horizon', type=int, default=1, help='Predict this many steps ahead (target at t+horizon)')
 parser.add_argument('--lookback', type=int, default=20, help='Number of past steps fed to the LSTM')
 parser.add_argument('--hidden', type=int, default=64, help='LSTM hidden size')
-parser.add_argument('--layers', type=int, default=2, help='Number of LSTM layers')
+parser.add_argument('--layers', type=int, default=1, help='Number of LSTM layers')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout (only effective if layers>1, depending on implementation)')
 parser.add_argument('--wd', type=float, default=1e-4, help='Weight decay for AdamW')
 parser.add_argument('--clip', type=float, default=1.0, help='Gradient clipping norm')
 parser.add_argument('--seed', type=int, default=0, help='Random seed')
 
 parser.add_argument('--traj-index', type=int, default=0, help='Trajectory index to plot')
-parser.add_argument('--dv', type=float, default=0.3, help='Delta v for dataset')
+parser.add_argument('--dv', type=float, default=5.0, help='Delta v for dataset')
 parser.add_argument('--dt', type=float, default=0.02, help='Time step for dataset')
-parser.add_argument('--n', type=int, default=20000, help='Number of trajectories in dataset')
+parser.add_argument('--n', type=int, default=10000, help='Number of trajectories in dataset')
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
 parser.add_argument('--batch-test', type=int, default=512, help='Batch size for evaluation')
-parser.add_argument('--n-epochs', type=int, default=50, help='Number of training epochs')
+parser.add_argument('--n-epochs', type=int, default=1, help='Number of training epochs')
 parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate for training')
 parser.add_argument('--ood', action='store_true', help='Whether to evaluate on OOD data with larger deltaV')
 parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
@@ -52,13 +50,12 @@ modelString = args.model
 traj_index = args.traj_index
 
 
-problemDim = 2
 
 device = getDevice()
 
 
 # hyperparameters
-problemDim = 2
+problemDim = 6
 input_size = problemDim
 output_size = problemDim
 
@@ -68,13 +65,11 @@ num_layers = args.layers
 lookback = args.lookback
 horizon = args.horizon
 
+dataset_loc = f"./data/gmat/{args.dv}km-{args.n}"
+dataset_file = "/statesArrayImpBurn.npy"
 
-# load data
-dataFile = './data/test/duffing_monte_carlo_trajectories_dv_{}_dt_{}_n_{}.npz'.format(args.dv, args.dt, args.n)
-
-system_data = np.load(dataFile,allow_pickle=True)
-dt = system_data['dt']
-trajs = system_data['trajectories'] # shape (num_trajectories, num_time_steps, problemDim)
+trajs = np.load(dataset_loc+dataset_file)["statesArrayImpBurn"] # (n_traj,min_prop,problemDim)
+dt = 60
 t = np.arange(0,trajs.shape[1]*dt,dt)
 
 # reshape numericResult to be (num_time_steps, num_trajectories, problemDim)
@@ -260,6 +255,56 @@ def alpha_shape_segments_and_area(points, radius_quantile=0.65):
     boundary_edges = uniq_edges[counts == 1]
 
     return points[boundary_edges], tri_area[keep].sum()
+def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
+    n = points.shape[0]
+    if n < 5:
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    try:
+        tet = Delaunay(points)
+    except QhullError:
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    simplices = tet.simplices  # (m, 4)
+    p = points[simplices]      # (m, 4, 3)
+
+    e01 = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
+    e02 = np.linalg.norm(p[:, 2] - p[:, 0], axis=1)
+    e03 = np.linalg.norm(p[:, 3] - p[:, 0], axis=1)
+    e12 = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
+    e13 = np.linalg.norm(p[:, 3] - p[:, 1], axis=1)
+    e23 = np.linalg.norm(p[:, 3] - p[:, 2], axis=1)
+    max_edge = np.maximum.reduce([e01, e02, e03, e12, e13, e23])
+
+    cross = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
+    tet_vol = np.abs(np.einsum("ij,ij->i", cross, p[:, 3] - p[:, 0])) / 6.0
+    valid = tet_vol > 1e-14
+    if not np.any(valid):
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    thresh = np.quantile(max_edge[valid], edge_quantile)
+    keep = valid & (max_edge <= thresh)
+    if not np.any(keep):
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    kept = simplices[keep]
+    faces = np.concatenate(
+        [
+            kept[:, [0, 1, 2]],
+            kept[:, [0, 1, 3]],
+            kept[:, [0, 2, 3]],
+            kept[:, [1, 2, 3]],
+        ],
+        axis=0,
+    )
+    faces_sorted = np.sort(faces, axis=1)
+    uniq_faces, counts = np.unique(faces_sorted, axis=0, return_counts=True)
+    boundary_faces = uniq_faces[counts == 1]
+    return points[boundary_faces], tet_vol[keep].sum()
 
 model = returnModel(modelString)
 modelString = modelString + '_ood' if args.ood else modelString
@@ -380,50 +425,47 @@ with torch.no_grad():
 final_true = denorm(true_last).numpy()
 final_pred = denorm(pred_last).numpy()
 
-true_segments, area_true = alpha_shape_segments_and_area(final_true, radius_quantile=0.95)
-pred_segments, area_pred = alpha_shape_segments_and_area(final_pred, radius_quantile=0.95)
+pos_true = final_true[:, :3]
+pos_pred = final_pred[:, :3]
+vel_true = final_true[:, 3:]
+vel_pred = final_pred[:, 3:]
 
-area_true = float(area_true)
-area_pred = float(area_pred)
-area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
+pos_faces_true, pos_vol_true = alpha_shape_faces_and_volume(pos_true, edge_quantile=0.95)
+pos_faces_pred, pos_vol_pred = alpha_shape_faces_and_volume(pos_pred, edge_quantile=0.95)
+vel_faces_true, vel_vol_true = alpha_shape_faces_and_volume(vel_true, edge_quantile=0.95)
+vel_faces_pred, vel_vol_pred = alpha_shape_faces_and_volume(vel_pred, edge_quantile=0.95)
 
-print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
+pos_ratio = float(pos_vol_pred) / float(pos_vol_true) if pos_vol_true > 0 else float('inf')
+vel_ratio = float(vel_vol_pred) / float(vel_vol_true) if vel_vol_true > 0 else float('inf')
+print(f"Pos Alpha-Shape Volume True: {pos_vol_true:.4f}, Pred: {pos_vol_pred:.4f}, Ratio: {pos_ratio:.4f}")
+print(f"Vel Alpha-Shape Volume True: {vel_vol_true:.4f}, Pred: {vel_vol_pred:.4f}, Ratio: {vel_ratio:.4f}")
 
-final_true = test_out[-1].numpy()
+fig = plt.figure(figsize=(14, 6))
+ax1 = fig.add_subplot(1, 2, 1, projection='3d')
+ax2 = fig.add_subplot(1, 2, 2, projection='3d')
 
-true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
-pred_segments, area_pred = alpha_shape_segments_and_area(final_pred,radius_quantile=0.95)
+for ax, t_pts, p_pts, t_faces, p_faces, title, labels in [
+    (ax1, pos_true, pos_pred, pos_faces_true, pos_faces_pred, f'Position Alpha Shapes (Ratio {pos_ratio:.4f})', ('x', 'y', 'z')),
+    (ax2, vel_true, vel_pred, vel_faces_true, vel_faces_pred, f'Velocity Alpha Shapes (Ratio {vel_ratio:.4f})', ('vx', 'vy', 'vz')),
+]:
+    ax.scatter(t_pts[:, 0], t_pts[:, 1], t_pts[:, 2], s=3, alpha=0.2, c='k')
+    ax.scatter(p_pts[:, 0], p_pts[:, 1], p_pts[:, 2], s=3, alpha=0.2, c='r')
+    ax.add_collection3d(Poly3DCollection(t_faces, facecolor='k', alpha=0.08, edgecolor='none'))
+    ax.add_collection3d(Poly3DCollection(p_faces, facecolor='r', alpha=0.08, edgecolor='none'))
+    all_pts = np.vstack((t_pts, p_pts))
+    mins = all_pts.min(axis=0)
+    maxs = all_pts.max(axis=0)
+    spans = np.maximum(maxs - mins, 1e-6)
+    ax.set_box_aspect(spans)
+    ax.set_xlim(mins[0], maxs[0])
+    ax.set_ylim(mins[1], maxs[1])
+    ax.set_zlim(mins[2], maxs[2])
+    ax.set_xlabel(labels[0])
+    ax.set_ylabel(labels[1])
+    ax.set_zlabel(labels[2])
+    ax.set_title(title)
 
-# calculate reachable-set areas and find ratio of pred area to true area
-area_true = float(area_true)
-area_pred = float(area_pred)
-
-area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
-
-print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
-
-plt.figure()
-plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
-plt.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
-ax = plt.gca()
-ax.add_collection(LineCollection(true_segments, colors='k', linewidths=2, label='True Alpha Shape'))
-ax.add_collection(LineCollection(pred_segments, colors='r', linewidths=2, linestyles='--', label='Pred Alpha Shape'))
-ax.autoscale_view()
-
-plt.title(modelString + ' Final-State Alpha Shapes: Area Ratio {:.4f}'.format(area_ratio))
-plt.xlabel('x1')
-plt.ylabel('x2')
-plt.legend(loc='best')
-plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
-plt.close()
-
-plt.figure()
-plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
-plt.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
-
-plt.title(modelString + ' Final-State Points')
-plt.xlabel('x1')
-plt.ylabel('x2')
-plt.legend(loc='best')
-plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
+fig.suptitle(modelString + ' Final-State 3D Alpha Shapes')
+plt.tight_layout()
+plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
 plt.close()
