@@ -5,26 +5,22 @@ import torch
 import torch.nn.functional as F
 import torch.utils.data as data
 import argparse
+import os
 from scipy.spatial import ConvexHull, Delaunay
 from scipy.spatial.qhull import QhullError # import here for p36 compatibility
-import torch
-import torch.nn as nn
 
 
 from qutils.ml.utils import printModelParmSize, getDevice, Adam_mini
 from qutils.tictoc import timer
-from qutils.ml.regression import LSTM
 from qutils.ml.utils import findDecAcc
-
-#import for superweight identification
-from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSuperWeight, findMambaSuperActivation,plotSuperActivation
 from qutils.ml.mamba import Mamba, MambaConfig
 
 # args parsing for model, horizon, traj_index
+# defaults are set for whitepaper results by default
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', type=str, default='mamba', help='Model to use')
+parser.add_argument('--model', type=str, default='lstm', help='Model to use')
 parser.add_argument('--horizon', type=int, default=1, help='Predict this many steps ahead (target at t+horizon)')
-parser.add_argument('--lookback', type=int, default=20, help='Number of past steps fed to the LSTM')
+parser.add_argument('--lookback', type=int, default=4, help='Number of past steps fed to the LSTM')
 parser.add_argument('--hidden', type=int, default=64, help='LSTM hidden size')
 parser.add_argument('--layers', type=int, default=1, help='Number of LSTM layers')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout (only effective if layers>1, depending on implementation)')
@@ -36,10 +32,11 @@ parser.add_argument('--traj-index', type=int, default=0, help='Trajectory index 
 parser.add_argument('--dv', type=float, default=5.0, help='Delta v for dataset')
 parser.add_argument('--dt', type=float, default=0.02, help='Time step for dataset')
 parser.add_argument('--n', type=int, default=10000, help='Number of trajectories in dataset')
-parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
+parser.add_argument('--train-ratio', type=float, default=0.8, help='Fallback ratio of timesteps to use for training when --train-timesteps is not set')
+parser.add_argument('--train-timesteps', type=int, default=5, help='Use first M timesteps in each trajectory for training')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
 parser.add_argument('--batch-test', type=int, default=512, help='Batch size for evaluation')
-parser.add_argument('--n-epochs', type=int, default=1, help='Number of training epochs')
+parser.add_argument('--n-epochs', type=int, default=10, help='Number of training epochs')
 parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate for training')
 parser.add_argument('--ood', action='store_true', help='Whether to evaluate on OOD data with larger deltaV')
 parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
@@ -50,12 +47,6 @@ parser.add_argument("--mamba-d-conv", type=int, default=4, help="Mamba local con
 parser.add_argument("--mamba-dt-rank", type=str, default="auto", help="Mamba dt rank ('auto' or integer)")
 parser.add_argument("--mamba-no-pscan", action="store_true", help="Disable parallel scan path in Mamba")
 
-
-
-args = parser.parse_args()
-
-modelString = args.model
-traj_index = args.traj_index
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
@@ -93,7 +84,7 @@ numericResult = trajs_t
 train_size = 5
 test_size = numericResult.shape[1] - train_size
 
-def create_datasets(data_TND, lookback, horizon, train_ratio, jetson=False):
+def create_datasets(data_TND, lookback, horizon, train_ratio=0.8, train_timesteps=None, jetson=False):
     """
     data_TND: (T, N, D)
     Returns:
@@ -105,10 +96,20 @@ def create_datasets(data_TND, lookback, horizon, train_ratio, jetson=False):
       meta: dict with window counts and traj counts for extracting per-time slices
     """
     T, N, D = data_TND.shape
-    split_idx = int(N * train_ratio)
+    min_required = lookback + horizon
+    split_t = train_timesteps if train_timesteps is not None else int(T * train_ratio)
+    if split_t < min_required:
+        raise ValueError(
+            f"train_timesteps must be >= lookback+horizon ({min_required}), got {split_t}"
+        )
+    if T - split_t < min_required:
+        raise ValueError(
+            f"Not enough test timesteps after split: T={T}, split_t={split_t}, "
+            f"required test timesteps >= {min_required}"
+        )
 
-    train = data_TND[:, :split_idx, :]   # (T, Ntr, D)
-    test  = data_TND[:, split_idx:, :]   # (T, Nts, D)
+    train = data_TND[:split_t, :, :]   # (Ttr, N, D)
+    test  = data_TND[split_t:, :, :]   # (Tte, N, D)
 
     if jetson:
         test = test[:, :min(test.shape[1], 1000), :]
@@ -146,7 +147,7 @@ def create_datasets(data_TND, lookback, horizon, train_ratio, jetson=False):
     Yte = torch.tensor(Yte, dtype=torch.float32)
 
     norm = {"mu": torch.tensor(mu, dtype=torch.float32), "sig": torch.tensor(sig, dtype=torch.float32)}
-    meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_idx": split_idx}
+    meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_t": split_t}
     return Xtr, Ytr, Xte, Yte, norm, meta
 
 
@@ -155,6 +156,7 @@ train_in, train_out, test_in, test_out, norm, meta = create_datasets(
     lookback=lookback,
     horizon=horizon,
     train_ratio=args.train_ratio,
+    train_timesteps=args.train_timesteps,
     jetson=args.jetson
 )
 
@@ -162,6 +164,43 @@ print(train_in.shape, train_out.shape, test_in.shape, test_out.shape)
 loader = data.DataLoader(data.TensorDataset(train_in, train_out), shuffle=True, batch_size=args.batch, pin_memory=True)
 
 
+
+import torch
+import torch.nn as nn
+
+class SimpleLSTMRegressor(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers=2, dropout=0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=(dropout if num_layers > 1 else 0.0),
+            batch_first=True,
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, output_size),
+        )
+
+        # Better default init than PyTorch’s raw defaults for regression
+        for name, p in self.lstm.named_parameters():
+            if "weight" in name:
+                nn.init.xavier_uniform_(p)
+            elif "bias" in name:
+                nn.init.zeros_(p)
+
+    def forward(self, x):
+        # x: (B, T, D)
+        if x.ndim != 3:
+            raise ValueError(f"Expected x of shape (B, T, D), got {tuple(x.shape)}")
+
+        out, _ = self.lstm(x)       # out: (B, T, H)
+        h_last = out[:, -1, :]      # (B, H)
+        y = self.head(h_last)       # (B, output_size)
+        return y
 
 
 class MambaRegressor(nn.Module):
@@ -204,18 +243,31 @@ def parse_dt_rank(value):
 
 
 def return_model():
-    model = MambaRegressor(
-        input_size=input_size,
-        d_model=args.hidden,
-        output_size=output_size,
-        n_layers=args.layers,
-        dropout=args.dropout,
-        d_state=args.mamba_d_state,
-        expand_factor=args.mamba_expand,
-        d_conv=args.mamba_d_conv,
-        dt_rank=parse_dt_rank(args.mamba_dt_rank),
-        pscan=(not args.mamba_no_pscan),
-    ).to(device).float()
+    printModelParmSize(model)
+    return model
+def returnModel(modelString='lstm'):
+    if modelString == 'lstm':
+        model = SimpleLSTMRegressor(
+            input_size=input_size,
+            hidden_size=args.hidden,      # from argparse
+            output_size=output_size,
+            num_layers=args.layers,
+            dropout=args.dropout,
+        ).to(device).float()
+    elif modelString == 'mamba':
+        model = MambaRegressor(
+            input_size=input_size,
+            d_model=args.hidden,
+            output_size=output_size,
+            n_layers=args.layers,
+            dropout=args.dropout,
+            d_state=args.mamba_d_state,
+            expand_factor=args.mamba_expand,
+            d_conv=args.mamba_d_conv,
+            dt_rank=parse_dt_rank(args.mamba_dt_rank),
+            pscan=(not args.mamba_no_pscan),
+        ).to(device).float()
+
     printModelParmSize(model)
     return model
 
@@ -324,7 +376,7 @@ def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
     boundary_faces = uniq_faces[counts == 1]
     return points[boundary_faces], tet_vol[keep].sum()
 
-model = return_model()
+model = returnModel(modelString)
 modelString = modelString + '_ood' if args.ood else modelString
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=args.wd)
@@ -416,7 +468,14 @@ if args.ood:
     ood_numericResult = ood_trajs_t
 
     # Create OOD test dataset
-    _, _, test_in, test_out = create_datasets(ood_numericResult, 1, train_size, device)
+    _, _, test_in, test_out, _, _ = create_datasets(
+        ood_numericResult,
+        lookback=lookback,
+        horizon=horizon,
+        train_ratio=args.train_ratio,
+        train_timesteps=args.train_timesteps,
+        jetson=args.jetson,
+    )
 # plot some predictions
 # De-normalize helper
 mu = norm["mu"]
@@ -487,6 +546,7 @@ fig.suptitle(modelString + ' Final-State 3D Alpha Shapes')
 plt.tight_layout()
 plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
 plt.close()
+
 # Plot one random test trajectory: predicted vs true across time
 rng = np.random.default_rng(args.seed)
 rand_traj_idx = int(rng.integers(0, Nts))

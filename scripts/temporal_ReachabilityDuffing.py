@@ -1,20 +1,18 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from matplotlib.collections import LineCollection
 import torch
 import torch.nn.functional as F
 import torch.utils.data as data
 import argparse
-import os
 from scipy.spatial import ConvexHull, Delaunay
 from scipy.spatial.qhull import QhullError # import here for p36 compatibility
 
 
 from qutils.ml.utils import printModelParmSize, getDevice, Adam_mini
 from qutils.tictoc import timer
-from qutils.ml.regression import LSTM
 from qutils.ml.utils import findDecAcc
-
+from qutils.ml.mamba import Mamba, MambaConfig
 #import for superweight identification
 from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSuperWeight, findMambaSuperActivation,plotSuperActivation
 
@@ -23,40 +21,44 @@ from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSupe
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='lstm', help='Model to use')
 parser.add_argument('--horizon', type=int, default=1, help='Predict this many steps ahead (target at t+horizon)')
-parser.add_argument('--lookback', type=int, default=20, help='Number of past steps fed to the LSTM')
+parser.add_argument('--lookback', type=int, default=4, help='Number of past steps fed to the LSTM')
 parser.add_argument('--hidden', type=int, default=64, help='LSTM hidden size')
 parser.add_argument('--layers', type=int, default=1, help='Number of LSTM layers')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout (only effective if layers>1, depending on implementation)')
 parser.add_argument('--wd', type=float, default=1e-4, help='Weight decay for AdamW')
 parser.add_argument('--clip', type=float, default=1.0, help='Gradient clipping norm')
 parser.add_argument('--seed', type=int, default=0, help='Random seed')
+parser.add_argument('--train-timesteps', type=int, default=5, help='Use first M timesteps in each trajectory for training')
 
 parser.add_argument('--traj-index', type=int, default=0, help='Trajectory index to plot')
-parser.add_argument('--dv', type=float, default=5.0, help='Delta v for dataset')
+parser.add_argument('--dv', type=float, default=0.3, help='Delta v for dataset')
 parser.add_argument('--dt', type=float, default=0.02, help='Time step for dataset')
-parser.add_argument('--n', type=int, default=10000, help='Number of trajectories in dataset')
+parser.add_argument('--n', type=int, default=20000, help='Number of trajectories in dataset')
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
 parser.add_argument('--batch-test', type=int, default=512, help='Batch size for evaluation')
-parser.add_argument('--n-epochs', type=int, default=1, help='Number of training epochs')
+parser.add_argument('--n-epochs', type=int, default=10, help='Number of training epochs')
 parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate for training')
 parser.add_argument('--ood', action='store_true', help='Whether to evaluate on OOD data with larger deltaV')
 parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
-args = parser.parse_args()
 
+parser.add_argument("--mamba-d-state", type=int, default=16, help="Mamba state size")
+parser.add_argument("--mamba-expand", type=int, default=2, help="Mamba expand factor")
+parser.add_argument("--mamba-d-conv", type=int, default=4, help="Mamba local conv kernel size")
+parser.add_argument("--mamba-dt-rank", type=str, default="auto", help="Mamba dt rank ('auto' or integer)")
+parser.add_argument("--mamba-no-pscan", action="store_true", help="Disable parallel scan path in Mamba")
+
+args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
-args = parser.parse_args()
-modelString = args.model
-traj_index = args.traj_index
 
 
+problemDim = 2
 
 device = getDevice()
 
 
 # hyperparameters
-problemDim = 6
 input_size = problemDim
 output_size = problemDim
 
@@ -66,11 +68,13 @@ num_layers = args.layers
 lookback = args.lookback
 horizon = args.horizon
 
-dataset_loc = f"./data/gmat/{args.dv}km-{args.n}"
-dataset_file = "/statesArrayImpBurn.npy"
 
-trajs = np.load(dataset_loc+dataset_file)["statesArrayImpBurn"] # (n_traj,min_prop,problemDim)
-dt = 60
+# load data
+dataFile = './data/test/duffing_monte_carlo_trajectories_dv_{}_dt_{}_n_{}.npz'.format(args.dv, args.dt, args.n)
+
+system_data = np.load(dataFile,allow_pickle=True)
+dt = system_data['dt']
+trajs = system_data['trajectories'] # shape (num_trajectories, num_time_steps, problemDim)
 t = np.arange(0,trajs.shape[1]*dt,dt)
 
 # reshape numericResult to be (num_time_steps, num_trajectories, problemDim)
@@ -83,7 +87,7 @@ numericResult = trajs_t
 train_size = 5
 test_size = numericResult.shape[1] - train_size
 
-def create_datasets(data_TND, lookback, horizon, train_ratio, jetson=False):
+def create_datasets(data_TND, lookback, horizon, train_ratio=0.8, train_timesteps=None, jetson=False):
     """
     data_TND: (T, N, D)
     Returns:
@@ -95,10 +99,20 @@ def create_datasets(data_TND, lookback, horizon, train_ratio, jetson=False):
       meta: dict with window counts and traj counts for extracting per-time slices
     """
     T, N, D = data_TND.shape
-    split_idx = int(N * train_ratio)
+    min_required = lookback + horizon
+    split_t = train_timesteps if train_timesteps is not None else int(T * train_ratio)
+    if split_t < min_required:
+        raise ValueError(
+            f"train_timesteps must be >= lookback+horizon ({min_required}), got {split_t}"
+        )
+    if T - split_t < min_required:
+        raise ValueError(
+            f"Not enough test timesteps after split: T={T}, split_t={split_t}, "
+            f"required test timesteps >= {min_required}"
+        )
 
-    train = data_TND[:, :split_idx, :]   # (T, Ntr, D)
-    test  = data_TND[:, split_idx:, :]   # (T, Nts, D)
+    train = data_TND[:split_t, :, :]   # (Ttr, N, D)
+    test  = data_TND[split_t:, :, :]   # (Tte, N, D)
 
     if jetson:
         test = test[:, :min(test.shape[1], 1000), :]
@@ -136,8 +150,9 @@ def create_datasets(data_TND, lookback, horizon, train_ratio, jetson=False):
     Yte = torch.tensor(Yte, dtype=torch.float32)
 
     norm = {"mu": torch.tensor(mu, dtype=torch.float32), "sig": torch.tensor(sig, dtype=torch.float32)}
-    meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_idx": split_idx}
+    meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_t": split_t}
     return Xtr, Ytr, Xte, Yte, norm, meta
+
 
 
 train_in, train_out, test_in, test_out, norm, meta = create_datasets(
@@ -145,6 +160,7 @@ train_in, train_out, test_in, test_out, norm, meta = create_datasets(
     lookback=lookback,
     horizon=horizon,
     train_ratio=args.train_ratio,
+    train_timesteps=args.train_timesteps,
     jetson=args.jetson
 )
 
@@ -155,6 +171,43 @@ loader = data.DataLoader(data.TensorDataset(train_in, train_out), shuffle=True, 
 
 import torch
 import torch.nn as nn
+class MambaRegressor(nn.Module):
+    def __init__(self, input_size, d_model, output_size, n_layers=2, dropout=0.1, d_state=16, expand_factor=2, d_conv=4, dt_rank="auto", pscan=True):
+        super().__init__()
+        config = MambaConfig(
+            d_model=d_model,
+            n_layers=n_layers,
+            dt_rank=dt_rank,
+            d_state=d_state,
+            expand_factor=expand_factor,
+            d_conv=d_conv,
+            pscan=pscan,
+            classifer=False,
+        )
+        self.in_proj = nn.Linear(input_size, d_model)
+        self.backbone = Mamba(config)
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, output_size),
+        )
+
+    def forward(self, x):
+        if x.ndim != 3:
+            raise ValueError(f"Expected x of shape (B, T, D), got {tuple(x.shape)}")
+        h = self.in_proj(x)
+        h = self.backbone(h)
+        h_last = h[:, -1, :]
+        y = self.head(h_last)
+        return y
+
+
+def parse_dt_rank(value):
+    if value == "auto":
+        return value
+    return int(value)
 
 class SimpleLSTMRegressor(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers=2, dropout=0.1):
@@ -192,13 +245,28 @@ class SimpleLSTMRegressor(nn.Module):
 
 
 def returnModel(modelString='lstm'):
-    model = SimpleLSTMRegressor(
-        input_size=input_size,
-        hidden_size=args.hidden,      # from argparse
-        output_size=output_size,
-        num_layers=args.layers,
-        dropout=args.dropout,
-    ).to(device).float()
+    if modelString == 'lstm':
+        model = SimpleLSTMRegressor(
+            input_size=input_size,
+            hidden_size=args.hidden,      # from argparse
+            output_size=output_size,
+            num_layers=args.layers,
+            dropout=args.dropout,
+        ).to(device).float()
+    elif modelString == 'mamba':
+        model = MambaRegressor(
+            input_size=input_size,
+            d_model=args.hidden,
+            output_size=output_size,
+            n_layers=args.layers,
+            dropout=args.dropout,
+            d_state=args.mamba_d_state,
+            expand_factor=args.mamba_expand,
+            d_conv=args.mamba_d_conv,
+            dt_rank=parse_dt_rank(args.mamba_dt_rank),
+            pscan=(not args.mamba_no_pscan),
+        ).to(device).float()
+
     printModelParmSize(model)
     return model
 
@@ -256,56 +324,6 @@ def alpha_shape_segments_and_area(points, radius_quantile=0.65):
     boundary_edges = uniq_edges[counts == 1]
 
     return points[boundary_edges], tri_area[keep].sum()
-def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
-    n = points.shape[0]
-    if n < 5:
-        hull = ConvexHull(points)
-        return points[hull.simplices], hull.volume
-
-    try:
-        tet = Delaunay(points)
-    except QhullError:
-        hull = ConvexHull(points)
-        return points[hull.simplices], hull.volume
-
-    simplices = tet.simplices  # (m, 4)
-    p = points[simplices]      # (m, 4, 3)
-
-    e01 = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
-    e02 = np.linalg.norm(p[:, 2] - p[:, 0], axis=1)
-    e03 = np.linalg.norm(p[:, 3] - p[:, 0], axis=1)
-    e12 = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
-    e13 = np.linalg.norm(p[:, 3] - p[:, 1], axis=1)
-    e23 = np.linalg.norm(p[:, 3] - p[:, 2], axis=1)
-    max_edge = np.maximum.reduce([e01, e02, e03, e12, e13, e23])
-
-    cross = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
-    tet_vol = np.abs(np.einsum("ij,ij->i", cross, p[:, 3] - p[:, 0])) / 6.0
-    valid = tet_vol > 1e-14
-    if not np.any(valid):
-        hull = ConvexHull(points)
-        return points[hull.simplices], hull.volume
-
-    thresh = np.quantile(max_edge[valid], edge_quantile)
-    keep = valid & (max_edge <= thresh)
-    if not np.any(keep):
-        hull = ConvexHull(points)
-        return points[hull.simplices], hull.volume
-
-    kept = simplices[keep]
-    faces = np.concatenate(
-        [
-            kept[:, [0, 1, 2]],
-            kept[:, [0, 1, 3]],
-            kept[:, [0, 2, 3]],
-            kept[:, [1, 2, 3]],
-        ],
-        axis=0,
-    )
-    faces_sorted = np.sort(faces, axis=1)
-    uniq_faces, counts = np.unique(faces_sorted, axis=0, return_counts=True)
-    boundary_faces = uniq_faces[counts == 1]
-    return points[boundary_faces], tet_vol[keep].sum()
 
 model = returnModel(modelString)
 modelString = modelString + '_ood' if args.ood else modelString
@@ -399,7 +417,14 @@ if args.ood:
     ood_numericResult = ood_trajs_t
 
     # Create OOD test dataset
-    _, _, test_in, test_out = create_datasets(ood_numericResult, 1, train_size, device)
+    _, _, test_in, test_out, _, _ = create_datasets(
+        ood_numericResult,
+        lookback=lookback,
+        horizon=horizon,
+        train_ratio=args.train_ratio,
+        train_timesteps=args.train_timesteps,
+        jetson=args.jetson,
+    )
 # plot some predictions
 # De-normalize helper
 mu = norm["mu"]
@@ -426,74 +451,48 @@ with torch.no_grad():
 final_true = denorm(true_last).numpy()
 final_pred = denorm(pred_last).numpy()
 
-pos_true = final_true[:, :3]
-pos_pred = final_pred[:, :3]
-vel_true = final_true[:, 3:]
-vel_pred = final_pred[:, 3:]
+true_segments, area_true = alpha_shape_segments_and_area(final_true, radius_quantile=0.95)
+pred_segments, area_pred = alpha_shape_segments_and_area(final_pred, radius_quantile=0.95)
 
-pos_faces_true, pos_vol_true = alpha_shape_faces_and_volume(pos_true, edge_quantile=0.95)
-pos_faces_pred, pos_vol_pred = alpha_shape_faces_and_volume(pos_pred, edge_quantile=0.95)
-vel_faces_true, vel_vol_true = alpha_shape_faces_and_volume(vel_true, edge_quantile=0.95)
-vel_faces_pred, vel_vol_pred = alpha_shape_faces_and_volume(vel_pred, edge_quantile=0.95)
+area_true = float(area_true)
+area_pred = float(area_pred)
+area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
 
-pos_ratio = float(pos_vol_pred) / float(pos_vol_true) if pos_vol_true > 0 else float('inf')
-vel_ratio = float(vel_vol_pred) / float(vel_vol_true) if vel_vol_true > 0 else float('inf')
-print(f"Pos Alpha-Shape Volume True: {pos_vol_true:.4f}, Pred: {pos_vol_pred:.4f}, Ratio: {pos_ratio:.4f}")
-print(f"Vel Alpha-Shape Volume True: {vel_vol_true:.4f}, Pred: {vel_vol_pred:.4f}, Ratio: {vel_ratio:.4f}")
+print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
 
-fig = plt.figure(figsize=(14, 6))
-ax1 = fig.add_subplot(1, 2, 1, projection='3d')
-ax2 = fig.add_subplot(1, 2, 2, projection='3d')
+true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
+pred_segments, area_pred = alpha_shape_segments_and_area(final_pred,radius_quantile=0.95)
 
-for ax, t_pts, p_pts, t_faces, p_faces, title, labels in [
-    (ax1, pos_true, pos_pred, pos_faces_true, pos_faces_pred, f'Position Alpha Shapes (Ratio {pos_ratio:.4f})', ('x', 'y', 'z')),
-    (ax2, vel_true, vel_pred, vel_faces_true, vel_faces_pred, f'Velocity Alpha Shapes (Ratio {vel_ratio:.4f})', ('vx', 'vy', 'vz')),
-]:
-    ax.scatter(t_pts[:, 0], t_pts[:, 1], t_pts[:, 2], s=3, alpha=0.2, c='k')
-    ax.scatter(p_pts[:, 0], p_pts[:, 1], p_pts[:, 2], s=3, alpha=0.2, c='r')
-    ax.add_collection3d(Poly3DCollection(t_faces, facecolor='k', alpha=0.08, edgecolor='none'))
-    ax.add_collection3d(Poly3DCollection(p_faces, facecolor='r', alpha=0.08, edgecolor='none'))
-    all_pts = np.vstack((t_pts, p_pts))
-    mins = all_pts.min(axis=0)
-    maxs = all_pts.max(axis=0)
-    spans = np.maximum(maxs - mins, 1e-6)
-    ax.set_box_aspect(spans)
-    ax.set_xlim(mins[0], maxs[0])
-    ax.set_ylim(mins[1], maxs[1])
-    ax.set_zlim(mins[2], maxs[2])
-    ax.set_xlabel(labels[0])
-    ax.set_ylabel(labels[1])
-    ax.set_zlabel(labels[2])
-    ax.set_title(title)
+# calculate reachable-set areas and find ratio of pred area to true area
+area_true = float(area_true)
+area_pred = float(area_pred)
 
-fig.suptitle(modelString + ' Final-State 3D Alpha Shapes')
-plt.tight_layout()
-plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
+area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
+
+print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
+
+plt.figure()
+plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
+plt.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
+ax = plt.gca()
+ax.add_collection(LineCollection(true_segments, colors='k', linewidths=2, label='True Alpha Shape'))
+ax.add_collection(LineCollection(pred_segments, colors='r', linewidths=2, linestyles='--', label='Pred Alpha Shape'))
+ax.autoscale_view()
+
+plt.title(modelString + ' Final-State Alpha Shapes: Area Ratio {:.4f}'.format(area_ratio))
+plt.xlabel('x1')
+plt.ylabel('x2')
+plt.legend(loc='best')
+plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
 plt.close()
 
-# Plot one random test trajectory: predicted vs true across time
-rng = np.random.default_rng(args.seed)
-rand_traj_idx = int(rng.integers(0, Nts))
+plt.figure()
+plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
+plt.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
 
-y_pred_test_den = denorm(y_pred_test).numpy().reshape(Wte, Nts, problemDim)
-y_true_test_den = denorm(y_true_test).numpy().reshape(Wte, Nts, problemDim)
-
-traj_pred = y_pred_test_den[:, rand_traj_idx, :]
-traj_true = y_true_test_den[:, rand_traj_idx, :]
-target_time_idx = np.arange(lookback + horizon - 1, lookback + horizon - 1 + Wte)
-time_axis = t[target_time_idx] if target_time_idx[-1] < len(t) else np.arange(Wte) * dt
-
-fig = plt.figure(figsize=(8, 6))
-labels = ['x', 'y', 'z', 'vx', 'vy', 'vz']
-for i in range(problemDim):
-    ax = fig.add_subplot(3, 2, i + 1)
-    ax.plot(time_axis, traj_true[:, i], 'k-', lw=1.5, label='True')
-    ax.plot(time_axis, traj_pred[:, i], 'r--', lw=1.5, label='Predicted')
-    ax.set_xlabel('time [s]')
-    ax.set_ylabel(labels[i])
-    if i == 0:
-        ax.legend(loc='best')
-fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
-plt.tight_layout()
-plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}.png')
+plt.title(modelString + ' Final-State Points')
+plt.xlabel('x1')
+plt.ylabel('x2')
+plt.legend(loc='best')
+plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
 plt.close()
