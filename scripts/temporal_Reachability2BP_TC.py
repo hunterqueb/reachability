@@ -33,7 +33,7 @@ parser.add_argument('--dv', type=float, default=5.0, help='Delta v for dataset')
 parser.add_argument('--dt', type=float, default=0.02, help='Time step for dataset')
 parser.add_argument('--n', type=int, default=10000, help='Number of trajectories in dataset')
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Fallback ratio of timesteps to use for training when --train-timesteps is not set')
-parser.add_argument('--train-timesteps', type=int, default=5, help='Use first M timesteps in each trajectory for training')
+parser.add_argument('--train-timesteps', type=int, default=None, help='Use first M timesteps in each trajectory for training')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
 parser.add_argument('--batch-test', type=int, default=512, help='Batch size for evaluation')
 parser.add_argument('--n-epochs', type=int, default=10, help='Number of training epochs')
@@ -548,6 +548,9 @@ plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.
 plt.close()
 
 # Plot one random test trajectory: predicted vs true across time
+# TODO - whenever a train timestep is used, the plot does not plot the full trajectory,
+# need to adjust time axis accordingly so that the time axis does not start at lookback+horizon-1 
+# but rather at the actual time corresponding to that index in the original trajs_t array. 
 rng = np.random.default_rng(args.seed)
 rand_traj_idx = int(rng.integers(0, Nts))
 
