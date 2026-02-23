@@ -1,8 +1,10 @@
 # ignore all .npz files
 *.npz
 
-# ignore all .png files
+# ignore all .png, eps, and pdf files
 *.png
+*.eps
+*.pdf
 
 # ignore all python cache files
 __pycache__/

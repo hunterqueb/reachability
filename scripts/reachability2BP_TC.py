@@ -34,9 +34,17 @@ parser.add_argument('--jetson', action='store_true', help='use flag to run on je
 parser.add_argument('--dim',action="store_true",help="train WITHOUT non dimensional coordinates")
 parser.add_argument('--dv',type=float,default=5.0,help="amount of delta v used for picking dataset")
 parser.add_argument('--n',type=int,default=10000,help='amount of trajectories used for picking dataset')
+parser.add_argument('--pdf', action='store_true', help='Whether to save plots in PDF format instead of PNG')
+
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
+
+
+if args.pdf:
+    saveType = 'pdf'
+else:
+    saveType = 'png'
 
 problemDim = 6
 
@@ -390,7 +398,7 @@ with torch.no_grad():
     ax.set_zlabel('z')
     ax.legend(loc='best')
     # save plot
-    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}_lr_{lr}.png')
+    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
     plt.close()
 
     final_true = test_out[-1].numpy()
@@ -444,7 +452,7 @@ with torch.no_grad():
 
         fig.suptitle(modelString + ' Final-State 3D Alpha Shapes')
         plt.tight_layout()
-        plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
+        plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
         plt.close()
     else:
         true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
@@ -476,7 +484,7 @@ with torch.no_grad():
         ax.set_ylabel('y')
         ax.set_zlabel('z')
         ax.legend(loc='best')
-        plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
+        plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
         plt.close()
 
     true_z = final_true[:, 2] if final_true.shape[1] >= 3 else np.zeros(final_true.shape[0])
@@ -491,7 +499,7 @@ with torch.no_grad():
     ax.set_ylabel('y')
     ax.set_zlabel('z')
     ax.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
+    plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
     plt.close()
     # Plot one random test trajectory: predicted vs true across time
     rng = np.random.default_rng(12)
@@ -516,7 +524,7 @@ with torch.no_grad():
             ax.legend(loc='best')
     fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
     plt.tight_layout()
-    plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}.png')
+    plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
     plt.close()
 
     if modelString == 'mamba':
@@ -533,4 +541,4 @@ with torch.no_grad():
         plotSuperWeight(model)
         plotSuperActivation(magnitude, index,printOutValues=True)
         plt.title("Mamba Reachability Super Activations")
-        plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}.png')
+        plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')

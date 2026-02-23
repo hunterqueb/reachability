@@ -47,11 +47,16 @@ parser.add_argument("--mamba-d-conv", type=int, default=4, help="Mamba local con
 parser.add_argument("--mamba-dt-rank", type=str, default="auto", help="Mamba dt rank ('auto' or integer)")
 parser.add_argument("--mamba-no-pscan", action="store_true", help="Disable parallel scan path in Mamba")
 
+parser.add_argument('--pdf', action='store_true', help='Whether to save plots in PDF format instead of PNG')
+
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
 
-
+if args.pdf:
+    saveType = 'pdf'
+else:
+    saveType = 'png'
 
 device = getDevice()
 
@@ -544,7 +549,7 @@ for ax, t_pts, p_pts, t_faces, p_faces, title, labels in [
 
 fig.suptitle(modelString + ' Final-State 3D Alpha Shapes')
 plt.tight_layout()
-plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}.png')
+plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_window_{args.train_timesteps}.{saveType}')
 plt.close()
 
 # Plot one random test trajectory: predicted vs true across time
@@ -574,5 +579,5 @@ for i in range(problemDim):
         ax.legend(loc='best')
 fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
 plt.tight_layout()
-plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}.png')
+plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_window_{args.train_timesteps}.{saveType}')
 plt.close()
