@@ -22,7 +22,9 @@ from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSupe
 # args parsing for model, horizon, traj_index
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='mamba', help='Model to use')
-parser.add_argument('--horizon', type=int, default=3, help='Horizon for prediction')
+parser.add_argument('--horizon', type=int, default=1, help='Predict this many steps ahead (target at t+horizon)')
+parser.add_argument('--lookback', type=int, default=4, help='Number of past steps fed to the model')
+parser.add_argument('--train-timesteps', type=int, default=4, help='Number of time steps from each edge used as training time region')
 parser.add_argument('--traj-index', type=int, default=0, help='Trajectory index to plot')
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
@@ -57,8 +59,9 @@ lr = args.lr
 input_size = problemDim
 output_size = problemDim
 num_layers = 1
-lookback = 1
+lookback = args.lookback
 horizon = args.horizon
+train_timesteps = args.train_timesteps
 
 
 # import gmat dataset
@@ -79,13 +82,16 @@ numericResult = trajs_t
 train_size = 5
 test_size = numericResult.shape[1] - train_size
 
-def create_datasets(data, seq_length, train_size, device):
-    # Split across dimension 0 (time): use edge windows for train (size ~2*horizon)
+def create_datasets(data, lookback, horizon, train_size, device, tw=None):
+    # Split across dimension 0 (time): use edge windows (size tw) for train
     # and middle window for test, while keeping 80-20 split across trajectories.
+    seq_length = lookback
+    if tw is None:
+        tw = train_timesteps
     split_idx = int(data.shape[1] * args.train_ratio)
     time_end = min(num_time_steps, data.shape[0])
-    train_time = np.concatenate([data[:horizon], data[time_end - horizon:time_end]], axis=0)
-    test_time = data[horizon:time_end - horizon]
+    train_time = np.concatenate([data[:tw], data[time_end - tw:time_end]], axis=0)
+    test_time = data[tw:time_end - tw]
 
     train_data = train_time[:, :split_idx, :]
     if args.jetson: 
@@ -96,9 +102,9 @@ def create_datasets(data, seq_length, train_size, device):
 
     def build_xy(d):
         xs, ys = [], []
-        for i in range(len(d) - seq_length):
-            x = d[i:(i + seq_length)]  # (seq_length, num_trajectories, problemDim)
-            y = d[i + seq_length]      # (num_trajectories, problemDim)
+        for i in range(len(d) - seq_length - horizon + 1):
+            x = d[i:(i + seq_length)]              # (seq_length, num_trajectories, problemDim)
+            y = d[i + seq_length + horizon - 1]    # (num_trajectories, problemDim)
             xs.append(x)
             ys.append(y)
         X = np.stack(xs, axis=0)  # (num_windows, seq_length, num_trajectories, problemDim)
@@ -108,14 +114,15 @@ def create_datasets(data, seq_length, train_size, device):
     X_train, Y_train = build_xy(train_data)
     X_test, Y_test = build_xy(test_data)
     # Convert to PyTorch tensors (keep on CPU; move batches to GPU in the loop)
-    X_train = torch.tensor(np.array(X_train)).float().squeeze()
+    # Shape: (num_windows, seq_length, num_trajectories, problemDim) — no squeeze, preserves (L,B,D) for Mamba
+    X_train = torch.tensor(np.array(X_train)).float()
     Y_train = torch.tensor(np.array(Y_train)).float()
-    X_test = torch.tensor(np.array(X_test)).float().squeeze()
+    X_test = torch.tensor(np.array(X_test)).float()
     Y_test = torch.tensor(np.array(Y_test)).float()
 
 
     return X_train,Y_train,X_test,Y_test
-train_in,train_out,test_in,test_out = create_datasets(numericResult,1,train_size,device)
+train_in,train_out,test_in,test_out = create_datasets(numericResult,lookback,horizon,train_size,device,tw=train_timesteps)
 print(train_in.shape)
 print(train_out.shape)
 print(test_in.shape)
@@ -255,8 +262,12 @@ for epoch in range(n_epochs):
     for X_batch, y_batch in loader:
         X_batch = X_batch.to(device)
         y_batch = y_batch.to(device)
-        y_pred = model(X_batch)
-        loss = criterion(y_pred, y_batch)
+        # X_batch: (batch, L, num_trajs, D) → reshape to (L, batch*num_trajs, D) for Mamba
+        b, L, T, D_sz = X_batch.shape
+        X_mamba = X_batch.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
+        y_flat = y_batch.reshape(b * T, D_sz)
+        y_pred = model(X_mamba)[-1]  # take last sequence step: (b*T, D)
+        loss = criterion(y_pred, y_flat)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -276,13 +287,17 @@ for epoch in range(n_epochs):
             for xb, yb in loader_eval:
                 xb = xb.to(device)
                 yb = yb.to(device)
-                pred = model(xb)
-                batch_loss = criterion(pred, yb).detach()
-                total_loss += batch_loss.item() * xb.shape[0]
-                total_count += xb.shape[0]
-                preds.append(pred.cpu())
+                # xb: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
+                b, L, T, D_sz = xb.shape
+                xb_mamba = xb.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
+                yb_flat = yb.reshape(b * T, D_sz)
+                pred = model(xb_mamba)[-1]  # (b*T, D)
+                batch_loss = criterion(pred, yb_flat).detach()
+                total_loss += batch_loss.item() * (b * T)
+                total_count += b * T
+                preds.append(pred.reshape(b, T, D_sz).cpu())
                 targets.append(yb.cpu())
-            pred_all = torch.cat(preds, dim=0)
+            pred_all = torch.cat(preds, dim=0)    # (num_windows, num_trajs, D)
             target_all = torch.cat(targets, dim=0)
             rmse = np.sqrt(total_loss / max(total_count, 1))
             return rmse, pred_all, target_all
@@ -317,7 +332,7 @@ if args.ood:
     ood_numericResult = ood_trajs_t
 
     # Create OOD test dataset
-    _, _, test_in, test_out = create_datasets(ood_numericResult, 1, train_size, device)
+    _, _, test_in, test_out = create_datasets(ood_numericResult, lookback, horizon, train_size, device, tw=train_timesteps)
 
 
 
@@ -327,9 +342,10 @@ with torch.no_grad():
     test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
 
     xb, yb = next(iter(test_loader))
-    xb = xb.to(device)
-    pred = model(xb)
-    pred = pred.cpu().numpy()
+    # xb: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
+    _b, _L, _T, _D = xb.shape
+    xb_mamba = xb.permute(1, 0, 2, 3).reshape(_L, _b * _T, _D).to(device)
+    pred = model(xb_mamba)[-1].cpu().numpy()   # (batch*num_trajs, D)
     yb = yb.cpu().numpy()
     xb = xb.cpu().numpy()
     traj_idx = traj_index
@@ -342,18 +358,15 @@ with torch.no_grad():
         preds = []
         for (xb_eval,) in loader_eval:
             xb_eval = xb_eval.to(device)
-            pred = model(xb_eval).cpu()
-            if pred.ndim == 3:
-                # If second dim isn't trajectory count, treat it as sequence and take last step.
-                if x_all.ndim >= 2 and pred.shape[1] != x_all.shape[1]:
-                    pred = pred[:, -1, :]
-                if slice_traj_idx is not None:
-                    pred = pred[:, slice_traj_idx, :]
-            elif pred.ndim == 2:
-                # Already (batch, problemDim); no trajectory axis to slice.
-                pass
+            # xb_eval: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
+            b, L, T, D_sz = xb_eval.shape
+            xb_mamba = xb_eval.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
+            pred = model(xb_mamba)[-1].cpu()  # (b*T, D)
+            pred = pred.reshape(b, T, D_sz)   # (batch, num_trajs, D)
+            if slice_traj_idx is not None:
+                pred = pred[:, slice_traj_idx, :]  # (batch, D)
             preds.append(pred)
-        return torch.cat(preds, dim=0)
+        return torch.cat(preds, dim=0)  # (num_windows, num_trajs, D) or (num_windows, D)
 
     train_pred = predict_last_step(train_in, slice_traj_idx=traj_idx).numpy()
     test_pred = predict_last_step(test_in, slice_traj_idx=traj_idx).numpy()
@@ -398,7 +411,7 @@ with torch.no_grad():
     ax.set_zlabel('z')
     ax.legend(loc='best')
     # save plot
-    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
+    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
     plt.close()
 
     final_true = test_out[-1].numpy()
@@ -452,7 +465,7 @@ with torch.no_grad():
 
         fig.suptitle(modelString + ' Final-State 3D Alpha Shapes')
         plt.tight_layout()
-        plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
+        plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_3d_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
         plt.close()
     else:
         true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
@@ -484,7 +497,7 @@ with torch.no_grad():
         ax.set_ylabel('y')
         ax.set_zlabel('z')
         ax.legend(loc='best')
-        plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
+        plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
         plt.close()
 
     true_z = final_true[:, 2] if final_true.shape[1] >= 3 else np.zeros(final_true.shape[0])
@@ -499,11 +512,11 @@ with torch.no_grad():
     ax.set_ylabel('y')
     ax.set_zlabel('z')
     ax.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
+    plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
     plt.close()
     # Plot one random test trajectory: predicted vs true across time
     rng = np.random.default_rng(12)
-    rand_traj_idx = rng.integers(0, test_in.shape[1])
+    rand_traj_idx = rng.integers(0, test_in.shape[2])  # shape: (num_windows, L, num_trajs, D)
     traj_true = build_full_seq(test_in, test_out, rand_traj_idx)
     traj_pred = build_full_seq(test_in, test_pred_full, rand_traj_idx)
     time_axis = np.arange(traj_true.shape[0]) * 60.0  # Assuming 60s time step
@@ -524,12 +537,15 @@ with torch.no_grad():
             ax.legend(loc='best')
     fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
     plt.tight_layout()
-    plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
+    plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
     plt.close()
 
     if modelString == 'mamba':
         xb, yb = next(iter(test_loader))
-        xb_one_traj = xb[:, traj_index:traj_index+1, :]
+        # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
+        b, L, T, D_sz = xb.shape
+        xb_one_traj = xb[:, :, traj_index:traj_index+1, :]  # (batch, L, 1, D)
+        xb_one_traj = xb_one_traj.permute(1, 0, 2, 3).reshape(L, b, D_sz)  # (L, batch, D)
         magnitude, index = findMambaSuperActivation(model, xb_one_traj.to(device))
 
         normedMagsMRP = np.zeros((len(magnitude),))
@@ -541,4 +557,4 @@ with torch.no_grad():
         plotSuperWeight(model)
         plotSuperActivation(magnitude, index,printOutValues=True)
         plt.title("Mamba Reachability Super Activations")
-        plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_window_{args.horizon*2}.{saveType}')
+        plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
