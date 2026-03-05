@@ -22,8 +22,8 @@ from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSupe
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='mamba', help='Model to use')
 parser.add_argument('--horizon', type=int, default=1, help='Predict this many steps ahead (target at t+horizon)')
-parser.add_argument('--lookback', type=int, default=4, help='Number of past steps fed to the model')
-parser.add_argument('--train-timesteps', type=int, default=4, help='Number of time steps from each edge used as training time region')
+parser.add_argument('--lookback', type=int, default=1, help='Number of past steps fed to the model')
+parser.add_argument('--train-timesteps', type=int, default=10, help='Number of time steps from each edge used as training time region')
 parser.add_argument('--traj-index', type=int, default=0, help='Trajectory index to plot')
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
@@ -364,8 +364,11 @@ if args.ood:
     ood_numericResult = ood_trajs_t
 
     # Create OOD test dataset
-    _, _, test_in, test_out = create_datasets(ood_numericResult, lookback, horizon, train_size, device, tw=train_timesteps)
-
+    if modelString == 'mamba_ood':
+        _, _, test_in, test_out = create_datasets_spatial(ood_numericResult, lookback, horizon, train_size, device, tw=train_timesteps)
+    else:
+        ood_numericResult = ood_numericResult.transpose(1, 0, 2)
+        _, _, test_in, test_out = create_datasets(ood_numericResult, lookback, horizon, train_size, device, tw=train_timesteps)
 
 
 # plot some predictions

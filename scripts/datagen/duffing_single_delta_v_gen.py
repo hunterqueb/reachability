@@ -524,6 +524,20 @@ if __name__ == "__main__":
         # ax.grid(True)
         # plt.plot(traj_nom[:, 0], traj_nom[:, 1], 'k--', linewidth=2.5, label="nominal trajectory")
 
+        # plot nomial trajectory on its own figure with pos and vel vs time
+        fig, ax = plt.subplots(2, 1, figsize=(8, 10))
+        time_axis = np.arange(steps + 1) * dt
+        ax[0].plot(time_axis, traj_nom[:, 0], 'k-', linewidth=2.5)
+        ax[0].set_xlabel("time (s)")
+        ax[0].set_ylabel("x1 (position)")
+        ax[0].set_title("Nominal Trajectory Position vs Time")
+        ax[0].grid(True)
+        ax[1].plot(time_axis, traj_nom[:, 1], 'k-', linewidth=2.5)
+        ax[1].set_xlabel("time (s)")
+        ax[1].set_ylabel("x2 (velocity)")
+        ax[1].set_title("Nominal Trajectory Velocity vs Time")
+        ax[1].grid(True)
+        plt.tight_layout()
         
         if args.ood:
             # plot ood initial condition band with in distrobution initial condition band
