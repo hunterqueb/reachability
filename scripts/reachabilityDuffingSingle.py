@@ -37,6 +37,13 @@ parser.add_argument('--dt',type=float,default=0.02,help="numerical value for tim
 parser.add_argument('--n',type=int,default=20000,help='amount of trajectories used for picking dataset')
 parser.add_argument('--pdf', action='store_true', help='Whether to save plots in PDF format instead of PNG')
 
+# lstm hyperparameters
+parser.add_argument('--hidden', type=int, default=64, help='LSTM hidden size')
+parser.add_argument('--layers', type=int, default=1, help='Number of LSTM layers')
+parser.add_argument('--dropout', type=float, default=0.1, help='Dropout (only effective if layers>1, depending on implementation)')
+parser.add_argument('--wd', type=float, default=1e-4, help='Weight decay for AdamW')
+parser.add_argument('--clip', type=float, default=1.0, help='Gradient clipping norm')
+
 args = parser.parse_args()
 modelString = args.model
 traj_index = args.traj_index
@@ -120,51 +127,119 @@ def create_datasets_spatial(data, lookback, horizon, train_size, device, tw=None
 
     return X_train,Y_train,X_test,Y_test
 
-def create_datasets(data, lookback, horizon, train_size, device, tw=None):
-    # Split across dimension 0 (time): use edge windows (size tw) for train
-    # and middle window for test, while keeping 80-20 split across trajectories.
-    seq_length = lookback
-    if tw is None:
-        tw = train_timesteps
-    split_idx = int(data.shape[1] * args.train_ratio)
-    time_end = min(num_time_steps, data.shape[0])
-    train_time = np.concatenate([data[:tw], data[time_end - tw:time_end]], axis=0)
-    test_time = data[tw:time_end - tw]
+def create_datasets(data_TND, lookback, horizon, train_ratio=0.8, train_timesteps=None, jetson=False):
+    """
+    data_TND: (T, N, D)
+    Returns:
+      X_train: (S_train, lookback, D)
+      Y_train: (S_train, D)
+      X_test : (S_test,  lookback, D)
+      Y_test : (S_test,  D)
+      norm: dict with mean/std for de/normalization
+      meta: dict with window counts and traj counts for extracting per-time slices
+    """
+    T, N, D = data_TND.shape
+    min_required = lookback + horizon
+    split_t = train_timesteps if train_timesteps is not None else int(T * train_ratio)
+    if split_t < min_required:
+        raise ValueError(
+            f"train_timesteps must be >= lookback+horizon ({min_required}), got {split_t}"
+        )
+    if T - split_t < min_required:
+        raise ValueError(
+            f"Not enough test timesteps after split: T={T}, split_t={split_t}, "
+            f"required test timesteps >= {min_required}"
+        )
 
-    train_data = train_time[:, :split_idx, :]
-    if args.jetson: 
-        # for jetson testing, use smaller test set to reduce memory requirements for test loss evaluation
-        test_data = test_time[:, split_idx:split_idx+1000, :]
-    else:
-        test_data = test_time[:, split_idx:, :]
+    train = data_TND[:split_t, :, :]   # (Ttr, N, D)
+    test  = data_TND[split_t:, :, :]   # (Tte, N, D)
 
-    def build_xy(d):
-        xs, ys = [], []
-        for i in range(len(d) - seq_length - horizon + 1):
-            x = d[i:(i + seq_length)]              # (seq_length, num_trajectories, problemDim)
-            y = d[i + seq_length + horizon - 1]    # (num_trajectories, problemDim)
-            xs.append(x)
-            ys.append(y)
-        X = np.stack(xs, axis=0)  # (num_windows, seq_length, num_trajectories, problemDim)
-        Y = np.stack(ys, axis=0)  # (num_windows, num_trajectories, problemDim)
-        return X, Y
+    if jetson:
+        test = test[:, :min(test.shape[1], 1000), :]
 
-    X_train, Y_train = build_xy(train_data)
-    X_test, Y_test = build_xy(test_data)
-    # Convert to PyTorch tensors (keep on CPU; move batches to GPU in the loop)
-    # Shape: (num_windows, seq_length, num_trajectories, problemDim) — no squeeze, preserves (L,B,D) for Mamba
-    X_train = torch.tensor(np.array(X_train)).float()
-    Y_train = torch.tensor(np.array(Y_train)).float()
-    X_test = torch.tensor(np.array(X_test)).float()
-    Y_test = torch.tensor(np.array(Y_test)).float()
+    def build_xy(block_TND):
+        T_, N_, D_ = block_TND.shape
+        W = T_ - lookback - horizon + 1
+        if W <= 0:
+            raise ValueError(f"Not enough timesteps: T={T_}, lookback={lookback}, horizon={horizon}")
+        # X: (W, lookback, N_, D_)
+        X = np.stack([block_TND[i:i+lookback] for i in range(W)], axis=0)
+        # Y at time i+lookback+horizon-1: (W, N_, D_)
+        Y = block_TND[lookback + horizon - 1 : lookback + horizon - 1 + W]
+        # reshape to samples per trajectory
+        X = X.transpose(0, 2, 1, 3).reshape(W * N_, lookback, D_)  # (W*N_, lookback, D_)
+        Y = Y.reshape(W * N_, D_)                                  # (W*N_, D_)
+        return X, Y, W, N_
 
+    Xtr, Ytr, Wtr, Ntr = build_xy(train)
+    Xte, Yte, Wte, Nts = build_xy(test)
 
-    return X_train,Y_train,X_test,Y_test
+    # Normalization from TRAIN only (apply to X and Y)
+    mu = Xtr.reshape(-1, D).mean(axis=0)
+    sig = Xtr.reshape(-1, D).std(axis=0)
+    sig = np.where(sig < 1e-8, 1.0, sig)
+
+    Xtr = (Xtr - mu) / sig
+    Ytr = (Ytr - mu) / sig
+    Xte = (Xte - mu) / sig
+    Yte = (Yte - mu) / sig
+
+    Xtr = torch.tensor(Xtr, dtype=torch.float32)
+    Ytr = torch.tensor(Ytr, dtype=torch.float32)
+    Xte = torch.tensor(Xte, dtype=torch.float32)
+    Yte = torch.tensor(Yte, dtype=torch.float32)
+
+    norm = {"mu": torch.tensor(mu, dtype=torch.float32), "sig": torch.tensor(sig, dtype=torch.float32)}
+    meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_t": split_t}
+    return Xtr, Ytr, Xte, Yte, norm, meta
+
+from torch import nn
+class SimpleLSTMRegressor(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers=2, dropout=0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=(dropout if num_layers > 1 else 0.0),
+            batch_first=True,
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, output_size),
+        )
+
+        # Better default init than PyTorch’s raw defaults for regression
+        for name, p in self.lstm.named_parameters():
+            if "weight" in name:
+                nn.init.xavier_uniform_(p)
+            elif "bias" in name:
+                nn.init.zeros_(p)
+
+    def forward(self, x):
+        # x: (B, T, D)
+        if x.ndim != 3:
+            raise ValueError(f"Expected x of shape (B, T, D), got {tuple(x.shape)}")
+
+        out, _ = self.lstm(x)       # out: (B, T, H)
+        h_last = out[:, -1, :]      # (B, H)
+        y = self.head(h_last)       # (B, output_size)
+        return y
+
 if modelString == 'mamba':
     train_in,train_out,test_in,test_out = create_datasets_spatial(numericResult,lookback,horizon,train_size,device,tw=train_timesteps)
 else:
     numericalResult = numericResult.transpose(1,0,2) # reshape to (num_trajectories, num_time_steps, problemDim) for LSTM
-    train_in,train_out,test_in,test_out = create_datasets(numericResult,lookback,horizon,train_size,device,tw=train_timesteps)
+    train_in, train_out, test_in, test_out, norm, meta = create_datasets(
+        numericResult,
+        lookback=lookback,
+        horizon=horizon,
+        train_ratio=args.train_ratio,
+        train_timesteps=args.train_timesteps,
+        jetson=args.jetson
+    )
 print(train_in.shape)
 print(train_out.shape)
 print(test_in.shape)
@@ -179,7 +254,13 @@ def returnModel(modelString = 'mamba'):
     if modelString == 'mamba':
         model = Mamba(config).to(device).float()
     elif modelString == 'lstm':
-        model = LSTM(input_size,30,output_size,num_layers,1).to(device).float()
+        model = SimpleLSTMRegressor(
+            input_size=input_size,
+            hidden_size=args.hidden,      # from argparse
+            output_size=output_size,
+            num_layers=args.layers,
+            dropout=args.dropout,
+        ).to(device).float()
     printModelParmSize(model)
     return model
 
@@ -297,63 +378,148 @@ optimizer = Adam_mini(model,lr=lr)
 criterion = F.smooth_l1_loss
 criterion = torch.nn.HuberLoss()
 
-trainTime = timer()
-for epoch in range(n_epochs):
+def trainMamba():
+    trainTime = timer()
+    for epoch in range(n_epochs):
 
-    model.train()
-    for X_batch, y_batch in loader:
-        X_batch = X_batch.to(device)
-        y_batch = y_batch.to(device)
-        # X_batch: (batch, L, num_trajs, D) → reshape to (L, batch*num_trajs, D) for Mamba
-        b, L, T, D_sz = X_batch.shape
-        X_mamba = X_batch.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
-        y_flat = y_batch.reshape(b * T, D_sz)
-        y_pred = model(X_mamba)[-1]  # take last sequence step: (b*T, D)
-        loss = criterion(y_pred, y_flat)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-    # Validation
-    model.eval()
-    with torch.no_grad():
-        def eval_batches(x_all, y_all, batch_size=args.batch_test):
-            loader_eval = data.DataLoader(
-                data.TensorDataset(x_all, y_all),
-                shuffle=True,
-                batch_size=batch_size,
-            )
-            preds = []
-            targets = []
-            total_loss = 0.0
-            total_count = 0
-            for xb, yb in loader_eval:
-                xb = xb.to(device)
-                yb = yb.to(device)
-                # xb: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
-                b, L, T, D_sz = xb.shape
-                xb_mamba = xb.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
-                yb_flat = yb.reshape(b * T, D_sz)
-                pred = model(xb_mamba)[-1]  # (b*T, D)
-                batch_loss = criterion(pred, yb_flat).detach()
-                total_loss += batch_loss.item() * (b * T)
-                total_count += b * T
-                preds.append(pred.reshape(b, T, D_sz).cpu())
-                targets.append(yb.cpu())
-            pred_all = torch.cat(preds, dim=0)    # (num_windows, num_trajs, D)
-            target_all = torch.cat(targets, dim=0)
-            rmse = np.sqrt(total_loss / max(total_count, 1))
-            return rmse, pred_all, target_all
+        model.train()
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+            # X_batch: (batch, L, num_trajs, D) → reshape to (L, batch*num_trajs, D) for Mamba
+            b, L, T, D_sz = X_batch.shape
+            X_mamba = X_batch.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
+            y_flat = y_batch.reshape(b * T, D_sz)
+            y_pred = model(X_mamba)[-1]  # take last sequence step: (b*T, D)
+            loss = criterion(y_pred, y_flat)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        # Validation
+        model.eval()
+        with torch.no_grad():
+            def eval_batches(x_all, y_all, batch_size=args.batch_test):
+                loader_eval = data.DataLoader(
+                    data.TensorDataset(x_all, y_all),
+                    shuffle=True,
+                    batch_size=batch_size,
+                )
+                preds = []
+                targets = []
+                total_loss = 0.0
+                total_count = 0
+                for xb, yb in loader_eval:
+                    xb = xb.to(device)
+                    yb = yb.to(device)
+                    # xb: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
+                    b, L, T, D_sz = xb.shape
+                    xb_mamba = xb.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
+                    yb_flat = yb.reshape(b * T, D_sz)
+                    pred = model(xb_mamba)[-1]  # (b*T, D)
+                    batch_loss = criterion(pred, yb_flat).detach()
+                    total_loss += batch_loss.item() * (b * T)
+                    total_count += b * T
+                    preds.append(pred.reshape(b, T, D_sz).cpu())
+                    targets.append(yb.cpu())
+                pred_all = torch.cat(preds, dim=0)    # (num_windows, num_trajs, D)
+                target_all = torch.cat(targets, dim=0)
+                rmse = np.sqrt(total_loss / max(total_count, 1))
+                return rmse, pred_all, target_all
 
-        train_loss, y_pred_train, y_true_train = eval_batches(train_in, train_out)
-        test_loss, y_pred_test, y_true_test = eval_batches(test_in, test_out)
+            train_loss, y_pred_train, y_true_train = eval_batches(train_in, train_out)
+            test_loss, y_pred_test, y_true_test = eval_batches(test_in, test_out)
 
-        decAcc, err1 = findDecAcc(y_true_train, y_pred_train, printOut=False)
-        decAcc, err2 = findDecAcc(y_true_test, y_pred_test)
-        err = np.concatenate((err1,err2),axis=0)
+            decAcc, err1 = findDecAcc(y_true_train, y_pred_train, printOut=False)
+            decAcc, err2 = findDecAcc(y_true_test, y_pred_test)
+            err = np.concatenate((err1,err2),axis=0)
 
-    print("Epoch %d: train loss %.4f, test loss %.4f\n" % (epoch, train_loss, test_loss))
+        print("Epoch %d: train loss %.4f, test loss %.4f\n" % (epoch, train_loss, test_loss))
 
-trainTime.toc()
+    trainTime.toc()
+
+
+def trainLSTM():
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6
+    )
+
+    use_amp = (device.type == 'cuda')
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+
+    trainTime = timer()
+    best_test = float('inf')
+    for epoch in range(n_epochs):
+        model.train()
+        total_train_loss = 0.0
+        total_train_count = 0
+
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device, non_blocking=True)
+            y_batch = y_batch.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                y_pred = model(X_batch)
+                loss = criterion(y_pred, y_batch)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip)
+            scaler.step(optimizer)
+            scaler.update()
+
+            total_train_loss += loss.detach().item() * X_batch.shape[0]
+            total_train_count += X_batch.shape[0]
+
+        model.eval()
+        with torch.no_grad():
+            def eval_rmse(x_all, y_all, batch_size):
+                loader_eval = data.DataLoader(
+                    data.TensorDataset(x_all, y_all),
+                    shuffle=False,
+                    batch_size=batch_size,
+                    pin_memory=True
+                )
+                se_sum = 0.0
+                n_sum = 0
+                preds = []
+                targets = []
+                for xb, yb in loader_eval:
+                    xb = xb.to(device, non_blocking=True)
+                    yb = yb.to(device, non_blocking=True)
+                    pred = model(xb)
+                    se_sum += torch.sum((pred - yb) ** 2).item()
+                    n_sum += yb.numel()
+                    preds.append(pred.cpu())
+                    targets.append(yb.cpu())
+                rmse = np.sqrt(se_sum / max(n_sum, 1))
+                return rmse, torch.cat(preds, dim=0), torch.cat(targets, dim=0)
+
+            train_rmse, y_pred_train, y_true_train = eval_rmse(train_in, train_out, args.batch_test)
+            test_rmse,  y_pred_test,  y_true_test  = eval_rmse(test_in,  test_out,  args.batch_test)
+
+            # Optional diagnostic metric you already use
+            decAcc, err1 = findDecAcc(y_true_train, y_pred_train, printOut=False)
+            decAcc, err2 = findDecAcc(y_true_test, y_pred_test)
+            err = np.concatenate((err1, err2), axis=0)
+
+        scheduler.step(test_rmse)
+
+        if test_rmse < best_test:
+            best_test = test_rmse
+
+        lr_now = optimizer.param_groups[0]["lr"]
+        print(f"Epoch {epoch:03d}: train RMSE {train_rmse:.6f}, test RMSE {test_rmse:.6f}, lr {lr_now:.2e}")
+
+    trainTime.toc()
+
+if modelString.startswith('mamba'):
+    trainMamba()
+elif modelString.startswith('lstm'):
+    trainLSTM()
+
 
 if args.ood:
     # Load OOD test data with larger deltaV
