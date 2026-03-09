@@ -332,7 +332,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Duffing Oscillator Monte Carlo Reachability")
     parser.add_argument("--dv", type=float, default=0.3, help="Radius of delta-v perturbation at control time")
     parser.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
-    parser.add_argument("--steps", type=int, default=100, help="Number of snapshots to compute")
+    parser.add_argument("--steps", type=int, default=None, help="Number of snapshots to compute")
     parser.add_argument("--T", type=float, default=16.0, help="Total simulation time in seconds")
     parser.add_argument("--dt", type=float, default=0.02, help="Time step for integration")
     parser.add_argument("--n", type=int, default=20000, help="Number of Monte Carlo trajectories to simulate")
@@ -358,7 +358,10 @@ if __name__ == "__main__":
     # Choose snapshot times (indices)
     snapshot_indices = (0, 100, 200, 400, 800)
     
-    zoneNums = args.steps
+    if args.steps is not None:
+        zoneNums = args.steps
+    else:
+        zoneNums = steps
     snapshot_indices = [0]
 
     for i in range(1, zoneNums + 1):
@@ -634,6 +637,11 @@ if __name__ == "__main__":
                     traj[k + 1] = traj[k]
             traj_list.append(traj)
         traj_list = np.array(traj_list) # n,steps,2
+
+        if args.steps is not None:
+            print(f"Saving Monte Carlo trajectories with snapshots at {args.steps} equispaced time points, mimicking discrete-time systems.")
+        else:
+            print(f"Saving Monte Carlo trajectories with snapshots at default propagation points.")
 
         if args.ood:
         # Save OOD data

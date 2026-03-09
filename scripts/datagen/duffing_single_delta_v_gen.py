@@ -332,7 +332,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Duffing Oscillator Monte Carlo Reachability")
     parser.add_argument("--dv", type=float, default=0.3, help="Radius of delta-v perturbation at control time")
     parser.add_argument("--no-numba", action="store_true", help="Disable Numba acceleration")
-    parser.add_argument("--steps", type=int, default=100, help="Number of snapshots to compute")
+    parser.add_argument("--steps", type=int, default=None, help="Number of equispaced snapshot times to compute (including t=0) - this simulates discrete measurements")
     parser.add_argument("--T", type=float, default=16.0, help="Total simulation time in seconds")
     parser.add_argument("--dt", type=float, default=0.02, help="Time step for integration")
     parser.add_argument("--n", type=int, default=20000, help="Number of Monte Carlo trajectories to simulate")
@@ -358,7 +358,10 @@ if __name__ == "__main__":
     # Choose snapshot times (indices)
     snapshot_indices = (0, 100, 200, 400, 800)
     
-    zoneNums = args.steps
+    if args.steps is not None:
+        zoneNums = args.steps
+    else:
+        zoneNums = steps
     snapshot_indices = [0]
 
     for i in range(1, zoneNums + 1):
@@ -430,15 +433,15 @@ if __name__ == "__main__":
             snap_keys = sorted(snapshots.keys())
             for k in snap_keys:
                 Xk = snapshots[k]
-                ax.scatter(Xk[:, 0], Xk[:, 1], s=3, alpha=0.06)#, label=f"t={k*dt:.2f}s" if k != snap_keys[0] else None)
-                # ax.scatter(Xk[:, 0], Xk[:, 1], s=3, alpha=0.6, label=f"t={k*dt:.2f}s" if k != snap_keys[0] else None)
+                # ax.scatter(Xk[:, 0], Xk[:, 1], s=3, alpha=0.06)#, label=f"t={k*dt:.2f}s" if k != snap_keys[0] else None)
+                ax.scatter(Xk[:, 0], Xk[:, 1], s=3, alpha=0.6, label=f"t={k*dt:.2f}s" if k != snap_keys[0] else None)
 
             # Plot final points
             ax.scatter(X_final[:, 0], X_final[:, 1], s=6, alpha=0.18, label="final samples")
 
             # get alpha shape hull for final points and plot
             hull_final, area_final = alpha_shape_segments_and_area(X_final, radius_quantile=0.95)
-            ax.add_collection(LineCollection(hull_final, linewidths=2, colors='k', label=f"final hull (area={area_final:.2f})"))
+            # ax.add_collection(LineCollection(hull_final, linewidths=2, colors='k', label=f"final hull (area={area_final:.2f})"))
 
             ax.set_xlabel("x1 (position)")
             ax.set_ylabel("x2 (velocity)")
@@ -480,6 +483,16 @@ if __name__ == "__main__":
             ax.legend(loc="best", frameon=True)
             plt.tight_layout()
 
+        # solve nominal system for reference
+        x_nom = np.array(x0_mean, dtype=float)
+        traj_nom = np.zeros((steps + 1, 2), dtype=float)
+        traj_nom[0] = x_nom
+        for k in range(steps):
+            if k == 0:
+                x_nom[1] = x_nom[1] + 0.0  # nominal control is zero
+            x_nom = rk4_step(x_nom, k * dt, 0.0, dt, omega, zeta, alpha=alpha, beta=beta, gamma=gamma, total_mass=total_mass)
+            traj_nom[k + 1] = x_nom
+
 
         plot_snapshots_and_final_hull(
             snapshots,
@@ -487,6 +500,8 @@ if __name__ == "__main__":
             dt,
             title="Duffing Oscillator Reachability (Monte Carlo Trajectories)"
         )
+        plt.plot(traj_nom[:, 0], traj_nom[:, 1], 'k--', linewidth=2.5, label="nominal trajectory")
+        plt.legend(loc="best", frameon=True)
 
         hulls = compute_hulls_for_snapshots(
             snapshots,
@@ -501,15 +516,6 @@ if __name__ == "__main__":
             snapshots=snapshots,
             title="Duffing Oscillator Reachability (Monte Carlo Convex Hulls with Nominal Trajectory)"
         )
-        # solve nominal system for reference
-        x_nom = np.array(x0_mean, dtype=float)
-        traj_nom = np.zeros((steps + 1, 2), dtype=float)
-        traj_nom[0] = x_nom
-        for k in range(steps):
-            if k == 0:
-                x_nom[1] = x_nom[1] + 0.0  # nominal control is zero
-            x_nom = rk4_step(x_nom, k * dt, 0.0, dt, omega, zeta, alpha=alpha, beta=beta, gamma=gamma, total_mass=total_mass)
-            traj_nom[k + 1] = x_nom
         # plot nominal trajectory on top of last figure
         plt.plot(traj_nom[:, 0], traj_nom[:, 1], 'k--', linewidth=2.5, label="nominal trajectory")
         plt.legend(loc="best", frameon=True)
@@ -538,7 +544,7 @@ if __name__ == "__main__":
         ax[1].set_title("Nominal Trajectory Velocity vs Time")
         ax[1].grid(True)
         plt.tight_layout()
-        
+
         if args.ood:
             # plot ood initial condition band with in distrobution initial condition band
             fig, ax = plt.subplots(figsize=(8, 6))
@@ -567,6 +573,7 @@ if __name__ == "__main__":
         plt.show()
 
     else:
+        time_axis = np.arange(steps + 1) * dt
     
         # using snapshots, construct n_traj trajectories
         n_traj = X_final.shape[0]
@@ -581,7 +588,22 @@ if __name__ == "__main__":
                     traj[k + 1] = traj[k]
             traj_list.append(traj)
         traj_list = np.array(traj_list) # n,steps,2
+        # # plot random trajecotry from the monte carlo set on top of nominal trajectory in time series form
+        # random_idx = np.random.randint(0, n_traj)
+        # fig = plt.figure(figsize=(8, 6))
+        # ax = fig.add_subplot(111)
+        # ax.plot(time_axis, traj_list[random_idx][:, 0], 'C0-', linewidth=1.5, label="random traj x1")
+        # ax.plot(time_axis, traj_list[random_idx][:, 1], 'C0--', linewidth=1.5, label="random traj x2")
+        # ax.set_xlabel("time (s)") 
+        # ax.set_title("Nominal vs Random Trajectory Time Series")
+        # ax.legend(loc="best", frameon=True)
 
+        # plt.show()
+
+        if args.steps is not None:
+            print(f"Saving Monte Carlo trajectories with snapshots at {args.steps} equispaced time points, mimicking discrete-time systems.")
+        else:
+            print(f"Saving Monte Carlo trajectories with snapshots at default propagation points.")
         if args.ood:
         # Save OOD data
             np.savez(save_dir + f"duffing_single_monte_carlo_trajectories_dv_{delta_v_radius_ood}_dt_{args.dt}_n_{args.n}_ood.npz", trajectories=traj_list_ood, dt=dt, parameters=[alpha, beta, gamma, omega, zeta], delta_v=delta_v_radius_ood, T=args.T)
