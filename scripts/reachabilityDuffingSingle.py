@@ -645,15 +645,17 @@ def lstmEval():
             true_last = test_out[start:end].cpu()
 
         def build_full_seq(x_all, y_all, traj_idx):
-            x_np = x_all.numpy()
-            y_np = y_all.numpy()
-            init = x_np[0, traj_idx, :][np.newaxis, :]
-            y_seq = y_np
-            return np.concatenate([init, y_seq], axis=0)
+            n_test = meta["N_test"]
+            if traj_idx < 0 or traj_idx >= n_test:
+                raise IndexError(f"traj_idx out of range: {traj_idx}, expected [0, {n_test-1}]")
+            # Flattened layout is (window0 traj0..trajN-1, window1 traj0..trajN-1, ...)
+            x_init = x_all[traj_idx, :, :].cpu()        # (lookback, D)
+            y_seq = y_all[traj_idx::n_test, :].cpu()    # (num_windows, D)
+            full_seq = torch.cat([x_init, y_seq], dim=0)
+            return denorm(full_seq).numpy()
 
-        # TODO - replace with proper build full sequence that handles LSTM indexing and de-normalization properly
-        true_test_seq = denorm(build_full_seq(test_in, test_out, traj_index))
-        pred_test_seq = denorm(build_full_seq(test_in, test_pred_full, traj_index))
+        true_test_seq = build_full_seq(test_in, test_out, traj_index)
+        pred_test_seq = build_full_seq(test_in, test_pred_full, traj_index)
 
         final_true = denorm(true_last).numpy()
         final_pred = denorm(pred_last).numpy()
@@ -726,21 +728,12 @@ elif modelString.startswith('lstm'):
     # Plot one random test trajectory: predicted vs true across time
     rng = np.random.default_rng(12)
     rand_traj_idx = rng.integers(0, test_in.shape[2])  # shape: (num_windows, L, num_trajs, D)
-    traj_true = build_full_seq(test_in, test_out, rand_traj_idx)
-    traj_pred = build_full_seq(test_in, test_pred_full, rand_traj_idx)
-    time_axis = np.arange(traj_true.shape[0]) * 60.0  # Assuming 60s time step
+    time_axis = np.arange(true_test_seq.shape[0]) * 60.0  # Assuming 60s time step
 
 
     fig = plt.figure(figsize=(8, 6))
-    labels = ['x', 'y', 'z', 'vx', 'vy', 'vz']
-    for i in range(problemDim):
-        ax = fig.add_subplot(1, 2, i + 1)
-        ax.plot(time_axis, traj_true[:, i], 'k-', lw=1.5, label='True')
-        ax.plot(time_axis, traj_pred[:, i], 'r--', lw=1.5, label='Predicted')
-        ax.set_xlabel('time [s]')
-        ax.set_ylabel(labels[i])
-        if i == 0:
-            ax.legend(loc='best')
+    plt.plot(time_axis, true_test_seq[:,0], 'k-', lw=1.5, label='True')
+    plt.plot(time_axis, pred_test_seq[:,0], 'r--', lw=1.5, label='Predicted')
     fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
     plt.tight_layout()
     plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
