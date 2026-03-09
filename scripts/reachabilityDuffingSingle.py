@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import torch
 import torch.nn.functional as F
@@ -672,89 +673,156 @@ if modelString.startswith('mamba'):
 elif modelString.startswith('lstm'):
     true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = lstmEval()
 
-    true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
-    pred_segments, area_pred = alpha_shape_segments_and_area(final_pred,radius_quantile=0.95)
+true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
+pred_segments, area_pred = alpha_shape_segments_and_area(final_pred,radius_quantile=0.95)
 
-    # calculate reachable-set areas and find ratio of pred area to true area
-    area_true = float(area_true)
-    area_pred = float(area_pred)
+# calculate reachable-set areas and find ratio of pred area to true area
+area_true = float(area_true)
+area_pred = float(area_pred)
 
-    area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
+area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
 
-    print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
-
-    
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-
-    ax.plot(true_test_seq[:, 0], true_test_seq[:, 1], 'k-', label='True Trajectory')
-    ax.plot(pred_test_seq[:, 0], pred_test_seq[:, 1], '--', label='Predicted Trajectory')
-    ax.set_title(modelString+' Reachability Prediction: Trajectory Index '+str(traj_index))
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.legend(loc='best')
-    # save plot
-    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
-    plt.close()
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    ax.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
-    ax.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
-    for i, seg in enumerate(true_segments):
-        ax.plot([seg[0, 0], seg[1, 0]], [seg[0, 1], seg[1, 1]], [0.0, 0.0], c='k', lw=2,
-                label='True Alpha Shape' if i == 0 else None)
-    for i, seg in enumerate(pred_segments):
-        ax.plot([seg[0, 0], seg[1, 0]], [seg[0, 1], seg[1, 1]], [0.0, 0.0], c='r', lw=2, ls='--',
-                label='Pred Alpha Shape' if i == 0 else None)
-
-    ax.set_title(modelString + ' Final-State Alpha Shapes: Area Ratio {:.4f}'.format(area_ratio))
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
-    plt.close()
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    ax.scatter(final_true[:, 0], final_true[:, 1],  s=6, alpha=0.4, label='True Final States')
-    ax.scatter(final_pred[:, 0], final_pred[:, 1],  s=6, alpha=0.4, label='Pred Final States')
-
-    ax.set_title(modelString + ' Final-State Points')
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.legend(loc='best')
-    plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
-    plt.close()
-    # Plot one random test trajectory: predicted vs true across time
-    rng = np.random.default_rng(12)
-    rand_traj_idx = rng.integers(0, test_in.shape[2])  # shape: (num_windows, L, num_trajs, D)
-    time_axis = np.arange(true_test_seq.shape[0]) * 60.0  # Assuming 60s time step
+print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
 
 
-    fig = plt.figure(figsize=(8, 6))
-    plt.plot(time_axis, true_test_seq[:,0], 'k-', lw=1.5, label='True')
-    plt.plot(time_axis, pred_test_seq[:,0], 'r--', lw=1.5, label='Predicted')
-    fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
-    plt.tight_layout()
-    plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
-    plt.close()
+fig = plt.figure()
+ax = fig.add_subplot(111)
 
-    if modelString == 'mamba':
-        test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
-        xb, yb = next(iter(test_loader))
-        # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
-        b, L, T, D_sz = xb.shape
-        xb_one_traj = xb[:, :, traj_index:traj_index+1, :]  # (batch, L, 1, D)
-        xb_one_traj = xb_one_traj.permute(1, 0, 2, 3).reshape(L, b, D_sz)  # (L, batch, D)
-        magnitude, index = findMambaSuperActivation(model, xb_one_traj.to(device))
+ax.plot(true_test_seq[:, 0], true_test_seq[:, 1], 'k-', label='True Trajectory')
+ax.plot(pred_test_seq[:, 0], pred_test_seq[:, 1], '--', label='Predicted Trajectory')
+ax.set_title(modelString+' Reachability Prediction: Trajectory Index '+str(traj_index))
+ax.set_xlabel('x')
+ax.set_ylabel('y')
+ax.legend(loc='best')
+# save plot
+plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+plt.close()
 
-        normedMagsMRP = np.zeros((len(magnitude),))
-        for i in range(len(magnitude)):
-            normedMagsMRP[i] = magnitude[i].norm().detach().cpu()
+fig = plt.figure()
+ax = fig.add_subplot(111)
+ax.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
+ax.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')
+for i, seg in enumerate(true_segments):
+    ax.plot([seg[0, 0], seg[1, 0]], [seg[0, 1], seg[1, 1]], [0.0, 0.0], c='k', lw=2,
+            label='True Alpha Shape' if i == 0 else None)
+for i, seg in enumerate(pred_segments):
+    ax.plot([seg[0, 0], seg[1, 0]], [seg[0, 1], seg[1, 1]], [0.0, 0.0], c='r', lw=2, ls='--',
+            label='Pred Alpha Shape' if i == 0 else None)
 
-        printoutMaxLayerWeight(model)
-        getSuperWeight(model)
-        plotSuperWeight(model)
-        plotSuperActivation(magnitude, index,printOutValues=True)
-        plt.title("Mamba Reachability Super Activations")
-        plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
+ax.set_title(modelString + ' Final-State Alpha Shapes: Area Ratio {:.4f}'.format(area_ratio))
+ax.set_xlabel('x')
+ax.set_ylabel('y')
+ax.legend(loc='best')
+plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+plt.close()
+fig = plt.figure()
+ax = fig.add_subplot(111)
+ax.scatter(final_true[:, 0], final_true[:, 1],  s=6, alpha=0.4, label='True Final States')
+ax.scatter(final_pred[:, 0], final_pred[:, 1],  s=6, alpha=0.4, label='Pred Final States')
+
+ax.set_title(modelString + ' Final-State Points')
+ax.set_xlabel('x')
+ax.set_ylabel('y')
+ax.legend(loc='best')
+plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+plt.close()
+# Plot one random test trajectory: predicted vs true across time
+rng = np.random.default_rng(12)
+rand_traj_idx = rng.integers(0, test_in.shape[2])  # shape: (num_windows, L, num_trajs, D)
+time_axis = np.arange(true_test_seq.shape[0]) * 60.0  # Assuming 60s time step
+
+
+fig = plt.figure(figsize=(8, 6))
+plt.plot(time_axis, true_test_seq[:,0], 'k-', lw=1.5, label='True')
+plt.plot(time_axis, pred_test_seq[:,0], 'r--', lw=1.5, label='Predicted')
+fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
+plt.tight_layout()
+plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+plt.close()
+
+if modelString.startswith('mamba'):
+    test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
+    xb, yb = next(iter(test_loader))
+    # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
+    b, L, T, D_sz = xb.shape
+    xb_one_traj = xb[:, :, traj_index:traj_index+1, :]  # (batch, L, 1, D)
+    xb_one_traj = xb_one_traj.permute(1, 0, 2, 3).reshape(L, b, D_sz)  # (L, batch, D)
+    magnitude, index = findMambaSuperActivation(model, xb_one_traj.to(device))
+
+    normedMagsMRP = np.zeros((len(magnitude),))
+    for i in range(len(magnitude)):
+        normedMagsMRP[i] = magnitude[i].norm().detach().cpu()
+
+    printoutMaxLayerWeight(model)
+    getSuperWeight(model)
+    plotSuperWeight(model)
+    plotSuperActivation(magnitude, index,printOutValues=True)
+    plt.title("Mamba Reachability Super Activations")
+    plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+
+
+# Build (num_frames, num_trajs, D) arrays for animation
+if modelString.startswith('mamba'):
+    # test_out: (num_windows, num_trajs, D); test_pred_full: (num_windows, num_trajs, D)
+    true_reach = test_out.detach().cpu().numpy()
+    pred_reach = test_pred_full.detach().cpu().numpy()
+elif modelString.startswith('lstm'):
+    # test_out: (W_te*N_ts, D) normalized; test_pred_full: (W_te*N_ts, D) denormalized
+    W_te = meta["W_test"]
+    N_ts = meta["N_test"]
+    mu_np = norm["mu"].numpy()
+    sig_np = norm["sig"].numpy()
+    true_reach = (test_out.detach().cpu().numpy() * sig_np + mu_np).reshape(W_te, N_ts, -1)
+    pred_reach = test_pred_full.detach().cpu().numpy().reshape(W_te, N_ts, -1)
+
+n_frames = min(true_reach.shape[0], pred_reach.shape[0])
+true_reach = true_reach[:n_frames]
+pred_reach = pred_reach[:n_frames]
+
+x_all = np.concatenate([true_reach[..., 0].ravel(), pred_reach[..., 0].ravel()])
+y_all = np.concatenate([true_reach[..., 1].ravel(), pred_reach[..., 1].ravel()])
+x_pad = 0.05 * max(1e-9, (x_all.max() - x_all.min()))
+y_pad = 0.05 * max(1e-9, (y_all.max() - y_all.min()))
+
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.set_xlim(x_all.min() - x_pad, x_all.max() + x_pad)
+ax.set_ylim(y_all.min() - y_pad, y_all.max() + y_pad)
+ax.set_xlabel('x')
+ax.set_ylabel('y')
+ax.set_title('Reachable Set Evolution (Test)')
+ax.grid(alpha=0.2, linewidth=0.5)
+
+true_scatter = ax.scatter([], [], s=6, alpha=0.45, c='k', label='True')
+pred_scatter = ax.scatter([], [], s=6, alpha=0.45, c='r', label='Predicted')
+frame_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, va='top')
+ax.legend(loc='best')
+
+def _init():
+    empty = np.empty((0, 2), dtype=np.float32)
+    true_scatter.set_offsets(empty)
+    pred_scatter.set_offsets(empty)
+    frame_text.set_text('')
+    return true_scatter, pred_scatter, frame_text
+
+def _update(frame_idx):
+    true_scatter.set_offsets(true_reach[frame_idx])
+    pred_scatter.set_offsets(pred_reach[frame_idx])
+    frame_text.set_text(f't = {(frame_idx + lookback + horizon - 1) * float(dt):.2f} s')
+    return true_scatter, pred_scatter, frame_text
+
+anim = FuncAnimation(
+    fig,
+    _update,
+    init_func=_init,
+    frames=n_frames,
+    interval=70,
+    blit=True,
+    repeat=False,
+)
+print("Saving animation...")
+out_base = "plots/" + modelString + f'_reachable_set_evolution_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
+try:
+    anim.save(out_base + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+except Exception:
+    anim.save(out_base + '.gif', writer=PillowWriter(fps=20))
+plt.close(fig)
