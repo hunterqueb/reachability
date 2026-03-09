@@ -18,5 +18,9 @@ fi
 
 
 
-python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model mamba --dv ${DV} --lookback 4 --train-timesteps 5
-python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model lstm --dv ${DV} --lookback 4 --train-timesteps 5
+python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model mamba --dv ${DV} --lookback 4 --train-timesteps 5 --pdf
+python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model lstm --dv ${DV} --lookback 4 --train-timesteps 5 --pdf
+
+# train timesteps 50 = 1 second window
+python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model mamba --dv ${DV} --lookback 10 --train-timesteps 50 --pdf
+python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model lstm --dv ${DV} --lookback 10 --train-timesteps 50 --pdf

@@ -471,6 +471,8 @@ area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
 
 print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
 
+# TODO - build a full trajectory plot of some random trajectory index in the train set
+
 plt.figure()
 plt.scatter(final_true[:, 0], final_true[:, 1], s=6, alpha=0.4, label='True Final States')
 plt.scatter(final_pred[:, 0], final_pred[:, 1], s=6, alpha=0.4, label='Pred Final States')

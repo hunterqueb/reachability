@@ -534,75 +534,141 @@ if args.ood:
         _, _, test_in, test_out = create_datasets_spatial(ood_numericResult, lookback, horizon, train_size, device, tw=train_timesteps)
     else:
         ood_numericResult = ood_numericResult.transpose(1, 0, 2)
-        _, _, test_in, test_out = create_datasets(ood_numericResult, lookback, horizon, train_size, device, tw=train_timesteps)
+        _, _, test_in, test_out, _, _ = create_datasets(
+            ood_numericResult,
+            lookback=lookback,
+            horizon=horizon,
+            train_ratio=args.train_ratio,
+            train_timesteps=args.train_timesteps,
+            jetson=args.jetson,
+        )
 
+def build_full_seq(x_all, y_all, traj_idx):
+    x_np = x_all.numpy()
+    y_np = y_all.numpy()
+    if x_np.ndim == 4:
+        init = x_np[0, :, traj_idx, :]
+    else:
+        init = x_np[0, traj_idx, :][np.newaxis, :]
+    y_seq = y_np[:, traj_idx, :]
+    print("init shape:", init.shape)
+    print("y_seq shape:", y_seq.shape)
+    return np.concatenate([init, y_seq], axis=0)
+
+def mambaEval():
+    with torch.no_grad():
+        test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
+
+        xb, yb = next(iter(test_loader))
+        # xb: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
+        _b, _L, _T, _D = xb.shape
+        xb_mamba = xb.permute(1, 0, 2, 3).reshape(_L, _b * _T, _D).to(device)
+        pred = model(xb_mamba)[-1].cpu().numpy()   # (batch*num_trajs, D)
+        yb = yb.cpu().numpy()
+        xb = xb.cpu().numpy()
+        traj_idx = traj_index
+        def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
+            loader_eval = data.DataLoader(
+                data.TensorDataset(x_all),
+                shuffle=False,
+                batch_size=batch_size,
+            )
+            preds = []
+            for (xb_eval,) in loader_eval:
+                xb_eval = xb_eval.to(device)
+                # xb_eval: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
+                b, L, T, D_sz = xb_eval.shape
+                xb_mamba = xb_eval.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
+                pred = model(xb_mamba)[-1].cpu()  # (b*T, D)
+                pred = pred.reshape(b, T, D_sz)   # (batch, num_trajs, D)
+                if slice_traj_idx is not None:
+                    pred = pred[:, slice_traj_idx, :]  # (batch, D)
+                preds.append(pred)
+            return torch.cat(preds, dim=0)  # (num_windows, num_trajs, D) or (num_windows, D)
+
+        train_pred = predict_last_step(train_in, slice_traj_idx=traj_idx).numpy()
+        test_pred = predict_last_step(test_in, slice_traj_idx=traj_idx).numpy()
+        test_pred_full = predict_last_step(test_in)
+
+        true_test_seq = build_full_seq(test_in, test_out, traj_idx)
+        pred_test_seq = build_full_seq(test_in, test_pred_full, traj_idx)
+
+        final_true = test_out[-1].numpy()
+        final_pred = test_pred_full[-1].numpy()
+
+        return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
+def lstmEval():
+    with torch.no_grad():
+        test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
+        xb, yb = next(iter(test_loader))
+        xb = xb.to(device)
+        yb = yb.to(device)
+        pred = model(xb).cpu().numpy()
+        yb = yb.cpu().numpy()
+        def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
+            loader_eval = data.DataLoader(
+                data.TensorDataset(x_all),
+                shuffle=False,
+                batch_size=batch_size,
+            )
+            preds = []
+            for (xb_eval,) in loader_eval:
+                xb_eval = xb_eval.to(device)
+                pred = model(xb_eval).cpu()  # (batch, D)
+                if slice_traj_idx is not None:
+                    pred = pred[:, slice_traj_idx]  # (batch,)
+                preds.append(pred)
+            return torch.cat(preds, dim=0)  # (num_windows, D)
+
+        test_pred_full = predict_last_step(test_in)
+
+        # De-normalize helper
+        mu = norm["mu"]
+        sig = norm["sig"]
+
+        def denorm(x):
+            # x: torch or np
+            if isinstance(x, np.ndarray):
+                return x * sig.numpy() + mu.numpy()
+            return x * sig + mu
+
+        # Extract last window slice (time = final available) across ALL test trajectories
+        Wte = meta["W_test"]
+        Nts = meta["N_test"]
+        start = (Wte - 1) * Nts
+        end = Wte * Nts
+
+        model.eval()
+        with torch.no_grad():
+            xb_last = test_in[start:end].to(device)
+            pred_last = model(xb_last).cpu()
+            true_last = test_out[start:end].cpu()
+
+        def build_full_seq(x_all, y_all, traj_idx):
+            x_np = x_all.numpy()
+            y_np = y_all.numpy()
+            init = x_np[0, traj_idx, :][np.newaxis, :]
+            y_seq = y_np
+            return np.concatenate([init, y_seq], axis=0)
+
+        # TODO - replace with proper build full sequence that handles LSTM indexing and de-normalization properly
+        true_test_seq = denorm(build_full_seq(test_in, test_out, traj_index))
+        pred_test_seq = denorm(build_full_seq(test_in, test_pred_full, traj_index))
+
+        final_true = denorm(true_last).numpy()
+        final_pred = denorm(pred_last).numpy()
+
+        test_pred_full = denorm(predict_last_step(test_in))
+
+
+        return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
 
 # plot some predictions
 model.eval()
-with torch.no_grad():
-    test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
-
-    xb, yb = next(iter(test_loader))
-    # xb: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
-    _b, _L, _T, _D = xb.shape
-    xb_mamba = xb.permute(1, 0, 2, 3).reshape(_L, _b * _T, _D).to(device)
-    pred = model(xb_mamba)[-1].cpu().numpy()   # (batch*num_trajs, D)
-    yb = yb.cpu().numpy()
-    xb = xb.cpu().numpy()
-    traj_idx = traj_index
-    def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
-        loader_eval = data.DataLoader(
-            data.TensorDataset(x_all),
-            shuffle=False,
-            batch_size=batch_size,
-        )
-        preds = []
-        for (xb_eval,) in loader_eval:
-            xb_eval = xb_eval.to(device)
-            # xb_eval: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
-            b, L, T, D_sz = xb_eval.shape
-            xb_mamba = xb_eval.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
-            pred = model(xb_mamba)[-1].cpu()  # (b*T, D)
-            pred = pred.reshape(b, T, D_sz)   # (batch, num_trajs, D)
-            if slice_traj_idx is not None:
-                pred = pred[:, slice_traj_idx, :]  # (batch, D)
-            preds.append(pred)
-        return torch.cat(preds, dim=0)  # (num_windows, num_trajs, D) or (num_windows, D)
-
-    train_pred = predict_last_step(train_in, slice_traj_idx=traj_idx).numpy()
-    test_pred = predict_last_step(test_in, slice_traj_idx=traj_idx).numpy()
-    test_pred_full = predict_last_step(test_in)
-    def build_full_seq(x_all, y_all, traj_idx):
-        x_np = x_all.numpy()
-        y_np = y_all.numpy()
-        if x_np.ndim == 4:
-            init = x_np[0, :, traj_idx, :]
-        else:
-            init = x_np[0, traj_idx, :][np.newaxis, :]
-        y_seq = y_np[:, traj_idx, :]
-        print("init shape:", init.shape)
-        print("y_seq shape:", y_seq.shape)
-        return np.concatenate([init, y_seq], axis=0)
-
-    true_test_seq = build_full_seq(test_in, test_out, traj_idx)
-    pred_test_seq = build_full_seq(test_in, test_pred_full, traj_idx)
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-
-    ax.plot(true_test_seq[:, 0], true_test_seq[:, 1], 'k-', label='True Trajectory')
-    ax.plot(pred_test_seq[:, 0], pred_test_seq[:, 1], '--', label='Predicted Trajectory')
-    ax.set_title(modelString+' Reachability Prediction: Trajectory Index '+str(traj_idx))
-    ax.set_xlabel('x')
-    ax.set_ylabel('y')
-    ax.legend(loc='best')
-    # save plot
-    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_idx}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
-    plt.close()
-
-    final_true = test_out[-1].numpy()
-    final_pred = test_pred_full[-1].numpy()
-
+if modelString.startswith('mamba'):
+    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = mambaEval()
+elif modelString.startswith('lstm'):
+    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = lstmEval()
 
     true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
     pred_segments, area_pred = alpha_shape_segments_and_area(final_pred,radius_quantile=0.95)
@@ -614,6 +680,20 @@ with torch.no_grad():
     area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
 
     print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
+
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+
+    ax.plot(true_test_seq[:, 0], true_test_seq[:, 1], 'k-', label='True Trajectory')
+    ax.plot(pred_test_seq[:, 0], pred_test_seq[:, 1], '--', label='Predicted Trajectory')
+    ax.set_title(modelString+' Reachability Prediction: Trajectory Index '+str(traj_index))
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    ax.legend(loc='best')
+    # save plot
+    plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{args.horizon*2}.{saveType}')
+    plt.close()
 
     fig = plt.figure()
     ax = fig.add_subplot(111)
@@ -667,6 +747,7 @@ with torch.no_grad():
     plt.close()
 
     if modelString == 'mamba':
+        test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
         xb, yb = next(iter(test_loader))
         # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
         b, L, T, D_sz = xb.shape
