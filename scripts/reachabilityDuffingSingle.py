@@ -88,15 +88,15 @@ train_size = 5
 test_size = numericResult.shape[1] - train_size
 
 def create_datasets_spatial(data, lookback, horizon, train_size, device, tw=None):
-    # Split across dimension 0 (time): use edge windows (size tw) for train
-    # and middle window for test, while keeping 80-20 split across trajectories.
+    # Split across dimension 0 (time): first tw steps for train, remainder for test.
+    # Trajectory split uses train_ratio across dimension 1.
     seq_length = lookback
     if tw is None:
         tw = train_timesteps
     split_idx = int(data.shape[1] * args.train_ratio)
     time_end = min(num_time_steps, data.shape[0])
-    train_time = np.concatenate([data[:tw], data[time_end - tw:time_end]], axis=0)
-    test_time = data[tw:time_end - tw]
+    train_time = data[:tw]
+    test_time = data[tw:time_end]
 
     train_data = train_time[:, :split_idx, :]
     if args.jetson: 
@@ -587,12 +587,16 @@ def mambaEval():
                 preds.append(pred)
             return torch.cat(preds, dim=0)  # (num_windows, num_trajs, D) or (num_windows, D)
 
-        train_pred = predict_last_step(train_in, slice_traj_idx=traj_idx).numpy()
-        test_pred = predict_last_step(test_in, slice_traj_idx=traj_idx).numpy()
         test_pred_full = predict_last_step(test_in)
 
-        true_test_seq = build_full_seq(test_in, test_out, traj_idx)
-        pred_test_seq = build_full_seq(test_in, test_pred_full, traj_idx)
+        traj_split_idx = int(numericResult.shape[1] * args.train_ratio)
+        train_traj_prefix = numericResult[:train_timesteps, traj_split_idx + traj_idx, :]  # (train_timesteps, D)
+        true_test_seq = np.concatenate(
+            [train_traj_prefix, build_full_seq(test_in, test_out, traj_idx)], axis=0
+        )  # (800, D)
+        pred_test_seq = np.concatenate(
+            [train_traj_prefix, build_full_seq(test_in, test_pred_full, traj_idx)], axis=0
+        )  # (800, D)
 
         final_true = test_out[-1].numpy()
         final_pred = test_pred_full[-1].numpy()
@@ -655,14 +659,18 @@ def lstmEval():
             full_seq = torch.cat([x_init, y_seq], dim=0)
             return denorm(full_seq).numpy()
 
-        true_test_seq = build_full_seq(test_in, test_out, traj_index)
-        pred_test_seq = build_full_seq(test_in, test_pred_full, traj_index)
+        train_traj_prefix = numericResult[:train_timesteps, traj_index, :]  # (train_timesteps, D)
+        true_test_seq = np.concatenate(
+            [train_traj_prefix, build_full_seq(test_in, test_out, traj_index)], axis=0
+        )  # (800, D)
+        pred_test_seq = np.concatenate(
+            [train_traj_prefix, build_full_seq(test_in, test_pred_full, traj_index)], axis=0
+        )  # (800, D)
 
         final_true = denorm(true_last).numpy()
         final_pred = denorm(pred_last).numpy()
 
         test_pred_full = denorm(predict_last_step(test_in))
-
 
         return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
 
@@ -689,7 +697,10 @@ fig = plt.figure()
 ax = fig.add_subplot(111)
 
 ax.plot(true_test_seq[:, 0], true_test_seq[:, 1], 'k-', label='True Trajectory')
-ax.plot(pred_test_seq[:, 0], pred_test_seq[:, 1], '--', label='Predicted Trajectory')
+tr = train_timesteps + 1
+ax.plot(pred_test_seq[:tr, 0], pred_test_seq[:tr, 1], 'b--', label='Pred (train region)')
+ax.plot(pred_test_seq[tr-1:, 0], pred_test_seq[tr-1:, 1], 'r--', label='Pred (test region)')
+
 ax.set_title(modelString+' Reachability Prediction: Trajectory Index '+str(traj_index))
 ax.set_xlabel('x')
 ax.set_ylabel('y')
@@ -740,7 +751,7 @@ plt.tight_layout()
 plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 plt.close()
 
-if modelString.startswith('mamba'):
+if modelString.startswith('mambaSADA'):
     test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
     xb, yb = next(iter(test_loader))
     # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
@@ -761,20 +772,46 @@ if modelString.startswith('mamba'):
     plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 
 
-# Build (num_frames, num_trajs, D) arrays for animation
+# Build (num_frames, num_trajs, D) arrays for animation.
+# Each array covers the full time range: the initial lookback window states followed by
+# per-window predictions, giving a complete reachable-surface animation from t=0.
 if modelString.startswith('mamba'):
-    # test_out: (num_windows, num_trajs, D); test_pred_full: (num_windows, num_trajs, D)
-    true_reach = test_out.detach().cpu().numpy()
-    pred_reach = test_pred_full.detach().cpu().numpy()
+    # test_in[0]: (lookback, num_trajs, D) — initial states for all trajs (original space)
+    # test_out:   (num_windows, num_trajs, D) — true targets at each window
+    # test_pred_full (= full_pred_seq from mambaEval): (lookback+num_windows, num_trajs, D) — already stitched
+    init_reach = test_in.numpy()[0]                          # (lookback, num_trajs, D)
+    true_reach_test = np.concatenate(
+        [init_reach, test_out.detach().cpu().numpy()], axis=0
+    )                                                        # (500, num_test_trajs, D)
+    pred_reach_test = test_pred_full.detach().cpu().numpy()  # (500, num_test_trajs, D)
+    # Prepend ground-truth training portion to reach full 800-step sequences
+    traj_split_idx = int(numericResult.shape[1] * args.train_ratio)
+    n_test_trajs = true_reach_test.shape[1]  # respects jetson 1000-traj limit
+    train_prefix = numericResult[:train_timesteps, traj_split_idx:traj_split_idx + n_test_trajs, :]
+    true_reach = np.concatenate([train_prefix, true_reach_test], axis=0)  # (800, num_test_trajs, D)
+    pred_reach = np.concatenate([train_prefix, pred_reach_test], axis=0)  # (800, num_test_trajs, D)
 elif modelString.startswith('lstm'):
-    # test_out: (W_te*N_ts, D) normalized; test_pred_full: (W_te*N_ts, D) denormalized
+    # test_in:      (W_te*N_ts, lookback, D) normalized, layout window-major traj-minor
+    # test_out:     (W_te*N_ts, D) normalized
+    # test_pred_full: (W_te*N_ts, D) denormalized
     W_te = meta["W_test"]
     N_ts = meta["N_test"]
     mu_np = norm["mu"].numpy()
     sig_np = norm["sig"].numpy()
-    true_reach = (test_out.detach().cpu().numpy() * sig_np + mu_np).reshape(W_te, N_ts, -1)
-    pred_reach = test_pred_full.detach().cpu().numpy().reshape(W_te, N_ts, -1)
+    # Initial window: first N_ts rows cover all trajs at window 0
+    init_np = test_in[:N_ts].numpy()                        # (N_ts, lookback, D) normalized
+    init_reach = init_np.transpose(1, 0, 2) * sig_np + mu_np  # (lookback, N_ts, D) denormalized
+    true_reach_wins = (test_out.detach().cpu().numpy() * sig_np + mu_np).reshape(W_te, N_ts, -1)
+    pred_reach_wins = test_pred_full.detach().cpu().numpy().reshape(W_te, N_ts, -1)
+    true_reach_test = np.concatenate([init_reach, true_reach_wins], axis=0)  # (500, N_ts, D)
+    pred_reach_test = np.concatenate([init_reach, pred_reach_wins], axis=0)  # (500, N_ts, D)
+    # Prepend ground-truth training portion to reach full 800-step sequences
+    train_prefix = numericResult[:train_timesteps, :N_ts, :]  # (300, N_ts, D) — match test traj count
+    true_reach = np.concatenate([train_prefix, true_reach_test], axis=0)  # (800, N_ts, D)
+    pred_reach = np.concatenate([train_prefix, pred_reach_test], axis=0)  # (800, N_ts, D)
 
+print(true_reach.shape)
+print(pred_reach.shape)
 n_frames = min(true_reach.shape[0], pred_reach.shape[0])
 true_reach = true_reach[:n_frames]
 pred_reach = pred_reach[:n_frames]
@@ -789,11 +826,11 @@ ax.set_xlim(x_all.min() - x_pad, x_all.max() + x_pad)
 ax.set_ylim(y_all.min() - y_pad, y_all.max() + y_pad)
 ax.set_xlabel('x')
 ax.set_ylabel('y')
-ax.set_title('Reachable Set Evolution (Test)')
+ax.set_title('Reachable Set Evolution: ' + modelString)
 ax.grid(alpha=0.2, linewidth=0.5)
 
 true_scatter = ax.scatter([], [], s=6, alpha=0.45, c='k', label='True')
-pred_scatter = ax.scatter([], [], s=6, alpha=0.45, c='r', label='Predicted')
+pred_scatter = ax.scatter([], [], s=6, alpha=0.45, c='purple', label='Network Output', marker='x')
 frame_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, va='top')
 ax.legend(loc='best')
 
@@ -807,7 +844,14 @@ def _init():
 def _update(frame_idx):
     true_scatter.set_offsets(true_reach[frame_idx])
     pred_scatter.set_offsets(pred_reach[frame_idx])
-    frame_text.set_text(f't = {(frame_idx + lookback + horizon - 1) * float(dt):.2f} s')
+    if frame_idx < train_timesteps:
+        true_scatter.set_facecolor('k')
+        pred_scatter.set_facecolor('b')
+        frame_text.set_text(f'Train Region\nt = {frame_idx * float(dt):.2f} s')
+    else:
+        true_scatter.set_facecolor('k')
+        pred_scatter.set_facecolor('r')
+        frame_text.set_text(f'Test Region\nt = {frame_idx * float(dt):.2f} s')
     return true_scatter, pred_scatter, frame_text
 
 anim = FuncAnimation(
