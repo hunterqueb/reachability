@@ -1,19 +1,18 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import torch
 import torch.nn.functional as F
 import torch.utils.data as data
 import argparse
 from scipy.spatial import ConvexHull, Delaunay
 from scipy.spatial.qhull import QhullError # import here for p36 compatibility
+from torch import nn
 
 
 from qutils.ml.utils import printModelParmSize, getDevice, Adam_mini
 from qutils.tictoc import timer
 from qutils.ml.mamba import Mamba, MambaConfig
-from qutils.ml.regression import LSTM
 from qutils.ml.utils import findDecAcc
 
 #import for superweight identification
@@ -70,6 +69,39 @@ lookback = args.lookback
 horizon = args.horizon
 train_timesteps = args.train_timesteps
 
+class SimpleLSTMRegressor(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers=2, dropout=0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=(dropout if num_layers > 1 else 0.0),
+            batch_first=True,
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, output_size),
+        )
+
+        # Better default init than PyTorch’s raw defaults for regression
+        for name, p in self.lstm.named_parameters():
+            if "weight" in name:
+                nn.init.xavier_uniform_(p)
+            elif "bias" in name:
+                nn.init.zeros_(p)
+
+    def forward(self, x):
+        # x: (B, T, D)
+        if x.ndim != 3:
+            raise ValueError(f"Expected x of shape (B, T, D), got {tuple(x.shape)}")
+
+        out, _ = self.lstm(x)       # out: (B, T, H)
+        h_last = out[:, -1, :]      # (B, H)
+        y = self.head(h_last)       # (B, output_size)
+        return y
 
 # load data
 dataFile = './data/test/duffing_single_monte_carlo_trajectories_dv_{}_dt_{}_n_{}.npz'.format(args.dv, args.dt, args.n)
@@ -84,10 +116,7 @@ trajs_t = np.transpose(trajs, (1, 0, 2))  # (num_time_steps, num_trajectories, p
 num_time_steps = trajs_t.shape[0]
 numericResult = trajs_t
 
-train_size = 5
-test_size = numericResult.shape[1] - train_size
-
-def create_datasets_spatial(data, lookback, horizon, train_size, device, tw=None):
+def create_datasets_spatial(data, lookback, horizon, tw=None):
     # Split across dimension 0 (time): first tw steps for train, remainder for test.
     # Trajectory split uses train_ratio across dimension 1.
     seq_length = lookback
@@ -194,43 +223,9 @@ def create_datasets(data_TND, lookback, horizon, train_ratio=0.8, train_timestep
     meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_t": split_t}
     return Xtr, Ytr, Xte, Yte, norm, meta
 
-from torch import nn
-class SimpleLSTMRegressor(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers=2, dropout=0.1):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            dropout=(dropout if num_layers > 1 else 0.0),
-            batch_first=True,
-        )
-        self.head = nn.Sequential(
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, hidden_size),
-            nn.GELU(),
-            nn.Linear(hidden_size, output_size),
-        )
-
-        # Better default init than PyTorch’s raw defaults for regression
-        for name, p in self.lstm.named_parameters():
-            if "weight" in name:
-                nn.init.xavier_uniform_(p)
-            elif "bias" in name:
-                nn.init.zeros_(p)
-
-    def forward(self, x):
-        # x: (B, T, D)
-        if x.ndim != 3:
-            raise ValueError(f"Expected x of shape (B, T, D), got {tuple(x.shape)}")
-
-        out, _ = self.lstm(x)       # out: (B, T, H)
-        h_last = out[:, -1, :]      # (B, H)
-        y = self.head(h_last)       # (B, output_size)
-        return y
 
 if modelString == 'mamba':
-    train_in,train_out,test_in,test_out = create_datasets_spatial(numericResult,lookback,horizon,train_size,device,tw=train_timesteps)
+    train_in,train_out,test_in,test_out = create_datasets_spatial(numericResult,lookback,horizon,tw=train_timesteps)
 else:
     numericalResult = numericResult.transpose(1,0,2) # reshape to (num_trajectories, num_time_steps, problemDim) for LSTM
     train_in, train_out, test_in, test_out, norm, meta = create_datasets(
@@ -265,111 +260,6 @@ def returnModel(modelString = 'mamba'):
     printModelParmSize(model)
     return model
 
-def alpha_shape_segments_and_area(points, radius_quantile=0.65):
-    n = points.shape[0]
-    if n < 4:
-        hull = ConvexHull(points)
-        verts = hull.vertices
-        cyc = np.column_stack([verts, np.roll(verts, -1)])
-        return points[cyc], hull.volume
-
-    try:
-        tri = Delaunay(points)
-    except QhullError:
-        hull = ConvexHull(points)
-        verts = hull.vertices
-        cyc = np.column_stack([verts, np.roll(verts, -1)])
-        return points[cyc], hull.volume
-
-    simplices = tri.simplices
-    p = points[simplices]
-    a = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
-    b = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
-    c = np.linalg.norm(p[:, 0] - p[:, 2], axis=1)
-    s = 0.5 * (a + b + c)
-    area_sq = s * (s - a) * (s - b) * (s - c)
-    area_sq = np.maximum(area_sq, 0.0)
-    tri_area = np.sqrt(area_sq)
-
-    valid = tri_area > 1e-12
-    if not np.any(valid):
-        hull = ConvexHull(points)
-        verts = hull.vertices
-        cyc = np.column_stack([verts, np.roll(verts, -1)])
-        return points[cyc], hull.volume
-
-    circum_r = np.full_like(tri_area, np.inf)
-    circum_r[valid] = (a[valid] * b[valid] * c[valid]) / (4.0 * tri_area[valid])
-    r_thresh = np.quantile(circum_r[valid], radius_quantile)
-    keep = valid & (circum_r <= r_thresh)
-
-    if not np.any(keep):
-        hull = ConvexHull(points)
-        verts = hull.vertices
-        cyc = np.column_stack([verts, np.roll(verts, -1)])
-        return points[cyc], hull.volume
-
-    kept = simplices[keep]
-    edges = np.concatenate(
-        [kept[:, [0, 1]], kept[:, [1, 2]], kept[:, [2, 0]]],
-        axis=0
-    )
-    edges = np.sort(edges, axis=1)
-    uniq_edges, counts = np.unique(edges, axis=0, return_counts=True)
-    boundary_edges = uniq_edges[counts == 1]
-
-    return points[boundary_edges], tri_area[keep].sum()
-
-def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
-    n = points.shape[0]
-    if n < 5:
-        hull = ConvexHull(points)
-        return points[hull.simplices], hull.volume
-
-    try:
-        tet = Delaunay(points)
-    except QhullError:
-        hull = ConvexHull(points)
-        return points[hull.simplices], hull.volume
-
-    simplices = tet.simplices  # (m, 4)
-    p = points[simplices]      # (m, 4, 3)
-
-    e01 = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
-    e02 = np.linalg.norm(p[:, 2] - p[:, 0], axis=1)
-    e03 = np.linalg.norm(p[:, 3] - p[:, 0], axis=1)
-    e12 = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
-    e13 = np.linalg.norm(p[:, 3] - p[:, 1], axis=1)
-    e23 = np.linalg.norm(p[:, 3] - p[:, 2], axis=1)
-    max_edge = np.maximum.reduce([e01, e02, e03, e12, e13, e23])
-
-    cross = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
-    tet_vol = np.abs(np.einsum("ij,ij->i", cross, p[:, 3] - p[:, 0])) / 6.0
-    valid = tet_vol > 1e-14
-    if not np.any(valid):
-        hull = ConvexHull(points)
-        return points[hull.simplices], hull.volume
-
-    thresh = np.quantile(max_edge[valid], edge_quantile)
-    keep = valid & (max_edge <= thresh)
-    if not np.any(keep):
-        hull = ConvexHull(points)
-        return points[hull.simplices], hull.volume
-
-    kept = simplices[keep]
-    faces = np.concatenate(
-        [
-            kept[:, [0, 1, 2]],
-            kept[:, [0, 1, 3]],
-            kept[:, [0, 2, 3]],
-            kept[:, [1, 2, 3]],
-        ],
-        axis=0,
-    )
-    faces_sorted = np.sort(faces, axis=1)
-    uniq_faces, counts = np.unique(faces_sorted, axis=0, return_counts=True)
-    boundary_faces = uniq_faces[counts == 1]
-    return points[boundary_faces], tet_vol[keep].sum()
 
 model = returnModel(modelString)
 modelString = modelString + '_ood' if args.ood else modelString
@@ -532,7 +422,7 @@ if args.ood:
 
     # Create OOD test dataset
     if modelString == 'mamba_ood':
-        _, _, test_in, test_out = create_datasets_spatial(ood_numericResult, lookback, horizon, train_size, device, tw=train_timesteps)
+        _, _, test_in, test_out = create_datasets_spatial(ood_numericResult, lookback, horizon, tw=train_timesteps)
     else:
         ood_numericResult = ood_numericResult.transpose(1, 0, 2)
         _, _, test_in, test_out, _, _ = create_datasets(
@@ -544,19 +434,20 @@ if args.ood:
             jetson=args.jetson,
         )
 
-def build_full_seq(x_all, y_all, traj_idx):
-    x_np = x_all.numpy()
-    y_np = y_all.numpy()
-    if x_np.ndim == 4:
-        init = x_np[0, :, traj_idx, :]
-    else:
-        init = x_np[0, traj_idx, :][np.newaxis, :]
-    y_seq = y_np[:, traj_idx, :]
-    print("init shape:", init.shape)
-    print("y_seq shape:", y_seq.shape)
-    return np.concatenate([init, y_seq], axis=0)
 
 def mambaEval():
+    def build_full_seq(x_all, y_all, traj_idx):
+        x_np = x_all.numpy()
+        y_np = y_all.numpy()
+        if x_np.ndim == 4:
+            init = x_np[0, :, traj_idx, :]
+        else:
+            init = x_np[0, traj_idx, :][np.newaxis, :]
+        y_seq = y_np[:, traj_idx, :]
+        print("init shape:", init.shape)
+        print("y_seq shape:", y_seq.shape)
+        return np.concatenate([init, y_seq], axis=0)
+
     with torch.no_grad():
         test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
 
@@ -602,6 +493,7 @@ def mambaEval():
         final_pred = test_pred_full[-1].numpy()
 
         return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
+    
 def lstmEval():
     with torch.no_grad():
         test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
@@ -674,12 +566,125 @@ def lstmEval():
 
         return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
 
-# plot some predictions
+# generate predictions
 model.eval()
 if modelString.startswith('mamba'):
     true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = mambaEval()
 elif modelString.startswith('lstm'):
     true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = lstmEval()
+
+
+##############################
+# Plotting
+##############################
+
+
+def alpha_shape_segments_and_area(points, radius_quantile=0.65):
+    n = points.shape[0]
+    if n < 4:
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    try:
+        tri = Delaunay(points)
+    except QhullError:
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    simplices = tri.simplices
+    p = points[simplices]
+    a = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
+    b = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
+    c = np.linalg.norm(p[:, 0] - p[:, 2], axis=1)
+    s = 0.5 * (a + b + c)
+    area_sq = s * (s - a) * (s - b) * (s - c)
+    area_sq = np.maximum(area_sq, 0.0)
+    tri_area = np.sqrt(area_sq)
+
+    valid = tri_area > 1e-12
+    if not np.any(valid):
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    circum_r = np.full_like(tri_area, np.inf)
+    circum_r[valid] = (a[valid] * b[valid] * c[valid]) / (4.0 * tri_area[valid])
+    r_thresh = np.quantile(circum_r[valid], radius_quantile)
+    keep = valid & (circum_r <= r_thresh)
+
+    if not np.any(keep):
+        hull = ConvexHull(points)
+        verts = hull.vertices
+        cyc = np.column_stack([verts, np.roll(verts, -1)])
+        return points[cyc], hull.volume
+
+    kept = simplices[keep]
+    edges = np.concatenate(
+        [kept[:, [0, 1]], kept[:, [1, 2]], kept[:, [2, 0]]],
+        axis=0
+    )
+    edges = np.sort(edges, axis=1)
+    uniq_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary_edges = uniq_edges[counts == 1]
+
+    return points[boundary_edges], tri_area[keep].sum()
+
+def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
+    n = points.shape[0]
+    if n < 5:
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    try:
+        tet = Delaunay(points)
+    except QhullError:
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    simplices = tet.simplices  # (m, 4)
+    p = points[simplices]      # (m, 4, 3)
+
+    e01 = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
+    e02 = np.linalg.norm(p[:, 2] - p[:, 0], axis=1)
+    e03 = np.linalg.norm(p[:, 3] - p[:, 0], axis=1)
+    e12 = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
+    e13 = np.linalg.norm(p[:, 3] - p[:, 1], axis=1)
+    e23 = np.linalg.norm(p[:, 3] - p[:, 2], axis=1)
+    max_edge = np.maximum.reduce([e01, e02, e03, e12, e13, e23])
+
+    cross = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
+    tet_vol = np.abs(np.einsum("ij,ij->i", cross, p[:, 3] - p[:, 0])) / 6.0
+    valid = tet_vol > 1e-14
+    if not np.any(valid):
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    thresh = np.quantile(max_edge[valid], edge_quantile)
+    keep = valid & (max_edge <= thresh)
+    if not np.any(keep):
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    kept = simplices[keep]
+    faces = np.concatenate(
+        [
+            kept[:, [0, 1, 2]],
+            kept[:, [0, 1, 3]],
+            kept[:, [0, 2, 3]],
+            kept[:, [1, 2, 3]],
+        ],
+        axis=0,
+    )
+    faces_sorted = np.sort(faces, axis=1)
+    uniq_faces, counts = np.unique(faces_sorted, axis=0, return_counts=True)
+    boundary_faces = uniq_faces[counts == 1]
+    return points[boundary_faces], tet_vol[keep].sum()
+
 
 true_segments, area_true = alpha_shape_segments_and_area(final_true,radius_quantile=0.95)
 pred_segments, area_pred = alpha_shape_segments_and_area(final_pred,radius_quantile=0.95)
@@ -751,7 +756,7 @@ plt.tight_layout()
 plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 plt.close()
 
-if modelString.startswith('mambaSADA'):
+if modelString.startswith('mamba'):
     test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
     xb, yb = next(iter(test_loader))
     # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
@@ -782,8 +787,10 @@ if modelString.startswith('mamba'):
     init_reach = test_in.numpy()[0]                          # (lookback, num_trajs, D)
     true_reach_test = np.concatenate(
         [init_reach, test_out.detach().cpu().numpy()], axis=0
-    )                                                        # (500, num_test_trajs, D)
-    pred_reach_test = test_pred_full.detach().cpu().numpy()  # (500, num_test_trajs, D)
+    )                                                        # (lookback+num_windows, num_test_trajs, D)
+    pred_reach_test = np.concatenate(
+        [init_reach, test_pred_full.detach().cpu().numpy()], axis=0
+    )                                                        # (lookback+num_windows, num_test_trajs, D)
     # Prepend ground-truth training portion to reach full 800-step sequences
     traj_split_idx = int(numericResult.shape[1] * args.train_ratio)
     n_test_trajs = true_reach_test.shape[1]  # respects jetson 1000-traj limit
