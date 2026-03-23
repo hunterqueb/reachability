@@ -27,3 +27,6 @@ python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model lstm --dv 
 
 python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model mamba --dv ${DV} --lookback 10 --train-timesteps 100 --pdf
 python scripts/reachabilityDuffingSingle.py --train-ratio 0.8 --model lstm --dv ${DV} --lookback 10 --train-timesteps 100 --pdf
+
+python scripts/reachabilityDuffingSingle.py --train-ratio 0.2 --model mamba --dv ${DV} --lookback 10 --train-timesteps 600 --pdf --jetson
+python scripts/reachabilityDuffingSingle.py --train-ratio 0.2 --model lstm --dv ${DV} --lookback 10 --train-timesteps 600 --pdf --jetson
