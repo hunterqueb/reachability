@@ -708,9 +708,10 @@ ax.plot(pred_test_seq[tr-1:, 0], pred_test_seq[tr-1:, 1], 'r--', label='Pred (te
 
 ax.set_title(modelString+' Reachability Prediction: Trajectory Index '+str(traj_index))
 ax.set_xlabel('x')
-ax.set_ylabel('y')
+ax.set_ylabel('xdot')
 ax.legend(loc='best')
 # save plot
+plt.grid()
 plt.savefig("plots/"+modelString+f'_reachability_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 plt.close()
 
@@ -727,8 +728,9 @@ for i, seg in enumerate(pred_segments):
 
 ax.set_title(modelString + ' Final-State Alpha Shapes: Area Ratio {:.4f}'.format(area_ratio))
 ax.set_xlabel('x')
-ax.set_ylabel('y')
+ax.set_ylabel('xdot')
 ax.legend(loc='best')
+plt.grid()
 plt.savefig("plots/" + modelString + f'_final_state_alpha_shapes_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 plt.close()
 fig = plt.figure()
@@ -738,8 +740,9 @@ ax.scatter(final_pred[:, 0], final_pred[:, 1],  s=6, alpha=0.4, label='Pred Fina
 
 ax.set_title(modelString + ' Final-State Points')
 ax.set_xlabel('x')
-ax.set_ylabel('y')
+ax.set_ylabel('xdot')
 ax.legend(loc='best')
+plt.grid()
 plt.savefig("plots/" + modelString + f'_final_state_points_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 plt.close()
 # Plot one random test trajectory: predicted vs true across time
@@ -753,6 +756,7 @@ plt.plot(time_axis, true_test_seq[:,0], 'k-', lw=1.5, label='True')
 plt.plot(time_axis, pred_test_seq[:,0], 'r--', lw=1.5, label='Predicted')
 fig.suptitle(f'Random Test Trajectory #{rand_traj_idx} (Pred vs True)')
 plt.tight_layout()
+plt.grid()
 plt.savefig("plots/" + modelString + f'_random_test_trajectory_{rand_traj_idx}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 plt.close()
 
@@ -832,7 +836,7 @@ fig, ax = plt.subplots(figsize=(8, 6))
 ax.set_xlim(x_all.min() - x_pad, x_all.max() + x_pad)
 ax.set_ylim(y_all.min() - y_pad, y_all.max() + y_pad)
 ax.set_xlabel('x')
-ax.set_ylabel('y')
+ax.set_ylabel('xdot')
 ax.set_title('Reachable Set Evolution: ' + modelString)
 ax.grid(alpha=0.2, linewidth=0.5)
 
@@ -840,6 +844,7 @@ true_scatter = ax.scatter([], [], s=6, alpha=0.45, c='k', label='True')
 pred_scatter = ax.scatter([], [], s=6, alpha=0.45, c='purple', label='Network Output', marker='x')
 frame_text = ax.text(0.02, 0.98, '', transform=ax.transAxes, va='top')
 ax.legend(loc='best')
+plt.grid()
 
 def _init():
     empty = np.empty((0, 2), dtype=np.float32)
